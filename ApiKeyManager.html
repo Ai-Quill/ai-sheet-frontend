@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="bg-gray-100 p-6 font-sans">
+    <div class="max-w-md mx-auto bg-white rounded-xl shadow-md overflow-hidden md:max-w-2xl">
+      <div class="p-8">
+        <h2 class="text-2xl font-bold mb-6 text-gray-800">Manage API Keys</h2>
+        
+        <!-- Add this at the top of the form -->
+        <div class="flex items-center mb-6">
+          <label for="user-id" class="w-24 text-sm font-medium text-gray-700">User ID:</label>
+          <input type="text" id="user-id" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+          <button onclick="saveUserId()" class="ml-2 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Save</button>
+        </div>
+        
+        <div class="space-y-4">
+          <div class="flex items-center">
+            <label for="chatgpt-key" class="w-24 text-sm font-medium text-gray-700">ChatGPT:</label>
+            <input type="password" id="chatgpt-key" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+            <button onclick="saveKey('CHATGPT')" class="ml-2 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Save</button>
+          </div>
+          
+          <div class="flex items-center">
+            <label for="claude-key" class="w-24 text-sm font-medium text-gray-700">Claude:</label>
+            <input type="password" id="claude-key" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+            <button onclick="saveKey('CLAUDE')" class="ml-2 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Save</button>
+          </div>
+          
+          <div class="flex items-center">
+            <label for="groq-key" class="w-24 text-sm font-medium text-gray-700">Groq:</label>
+            <input type="password" id="groq-key" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+            <button onclick="saveKey('GROQ')" class="ml-2 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Save</button>
+          </div>
+          
+          <div class="flex items-center">
+            <label for="gemini-key" class="w-24 text-sm font-medium text-gray-700">Gemini:</label>
+            <input type="password" id="gemini-key" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+            <button onclick="saveKey('GEMINI')" class="ml-2 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Save</button>
+          </div>
+        </div>
+        
+        <div id="message" class="mt-4 text-sm text-gray-600"></div>
+      </div>
+    </div>
+    
+    <script>
+      function saveKey(model) {
+        var key = document.getElementById(model.toLowerCase() + '-key').value;
+        google.script.run
+          .withSuccessHandler(showMessage)
+          .saveApiKey(model, key);
+      }
+      
+      function showMessage(msg) {
+        document.getElementById('message').innerHTML = msg;
+        document.getElementById('message').classList.add('p-4', 'bg-green-100', 'text-green-700', 'rounded-md');
+        setTimeout(() => {
+          document.getElementById('message').innerHTML = '';
+          document.getElementById('message').classList.remove('p-4', 'bg-green-100', 'text-green-700', 'rounded-md');
+        }, 3000);
+      }
+      
+      function saveUserId() {
+        var userId = document.getElementById('user-id').value;
+        google.script.run
+          .withSuccessHandler(showMessage)
+          .saveUserId(userId);
+      }
+    </script>
+  </body>
+</html>

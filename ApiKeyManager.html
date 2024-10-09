@@ -1,74 +1,185 @@
 <!DOCTYPE html>
 <html>
-  <head>
+<head>
     <base target="_top">
-    <script src="https://cdn.tailwindcss.com"></script>
-  </head>
-  <body class="bg-gray-100 p-6 font-sans">
-    <div class="max-w-md mx-auto bg-white rounded-xl shadow-md overflow-hidden md:max-w-2xl">
-      <div class="p-8">
-        <h2 class="text-2xl font-bold mb-6 text-gray-800">Manage API Keys</h2>
-        
-        <!-- Add this at the top of the form -->
-        <div class="flex items-center mb-6">
-          <label for="user-id" class="w-24 text-sm font-medium text-gray-700">User ID:</label>
-          <input type="text" id="user-id" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-          <button onclick="saveUserId()" class="ml-2 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Save</button>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.0.3/dist/tailwind.min.css">
+</head>
+<body class="bg-gray-100">
+    <div class="text-gray-800">
+        <h1 class="text-xl font-bold p-4 border-b">AI Assistant</h1>
+        <div class="p-4">
+            <button onclick="showHome()" class="w-full text-left py-2 px-4 bg-blue-500 text-white rounded mb-2">Home</button>
+            <button onclick="showSettings()" class="w-full text-left py-2 px-4 bg-blue-500 text-white rounded mb-2">Settings</button>
+            <button onclick="showPrivacy()" class="w-full text-left py-2 px-4 bg-blue-500 text-white rounded">Privacy & Legal</button>
         </div>
-        
-        <div class="space-y-4">
-          <div class="flex items-center">
-            <label for="chatgpt-key" class="w-24 text-sm font-medium text-gray-700">ChatGPT:</label>
-            <input type="password" id="chatgpt-key" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-            <button onclick="saveKey('CHATGPT')" class="ml-2 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Save</button>
-          </div>
-          
-          <div class="flex items-center">
-            <label for="claude-key" class="w-24 text-sm font-medium text-gray-700">Claude:</label>
-            <input type="password" id="claude-key" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-            <button onclick="saveKey('CLAUDE')" class="ml-2 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Save</button>
-          </div>
-          
-          <div class="flex items-center">
-            <label for="groq-key" class="w-24 text-sm font-medium text-gray-700">Groq:</label>
-            <input type="password" id="groq-key" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-            <button onclick="saveKey('GROQ')" class="ml-2 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Save</button>
-          </div>
-          
-          <div class="flex items-center">
-            <label for="gemini-key" class="w-24 text-sm font-medium text-gray-700">Gemini:</label>
-            <input type="password" id="gemini-key" class="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-            <button onclick="saveKey('GEMINI')" class="ml-2 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Save</button>
-          </div>
+        <div id="content" class="p-4">
+            <!-- Dynamic content will be loaded here -->
         </div>
-        
-        <div id="message" class="mt-4 text-sm text-gray-600"></div>
-      </div>
     </div>
-    
+
     <script>
-      function saveKey(model) {
-        var key = document.getElementById(model.toLowerCase() + '-key').value;
-        google.script.run
-          .withSuccessHandler(showMessage)
-          .saveApiKey(model, key);
-      }
-      
-      function showMessage(msg) {
-        document.getElementById('message').innerHTML = msg;
-        document.getElementById('message').classList.add('p-4', 'bg-green-100', 'text-green-700', 'rounded-md');
-        setTimeout(() => {
-          document.getElementById('message').innerHTML = '';
-          document.getElementById('message').classList.remove('p-4', 'bg-green-100', 'text-green-700', 'rounded-md');
-        }, 3000);
-      }
-      
-      function saveUserId() {
-        var userId = document.getElementById('user-id').value;
-        google.script.run
-          .withSuccessHandler(showMessage)
-          .saveUserId(userId);
-      }
+        function showHome() {
+            const content = document.getElementById('content');
+            content.innerHTML = '<h2 class="text-lg font-bold">Home</h2><p>Welcome to your AI Assistant dashboard.</p>';
+        }
+
+        function showSettings() {
+            const content = document.getElementById('content');
+            content.innerHTML = `
+                <h2 class="text-lg font-bold">Settings</h2>
+                <p>Manage your API keys and model configurations here.</p>
+                <div class="max-w-2xl mx-auto bg-white rounded-xl shadow-md overflow-hidden">
+                    <div class="p-8">
+                        <h2 class="text-2xl font-bold mb-6 text-gray-800">AI Assistant Settings</h2>
+                        <form id="settingsForm" class="space-y-6">
+                            <div class="border-b border-gray-200 pb-5">
+                                <h3 class="text-lg font-medium leading-6 text-gray-900">ChatGPT</h3>
+                                <div class="mt-2 flex items-center">
+                                    <input type="password" id="chatgpt-key" placeholder="API Key" class="flex-grow block px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                    <button type="button" onclick="togglePasswordVisibility('chatgpt-key', this)" class="ml-2 inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                        View
+                                    </button>
+                                </div>
+                                <div class="mt-2">
+                                    <select id="chatgpt-model" class="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                        <option value="gpt-4o">GPT-4o</option>
+                                        <option value="gpt-4o-mini">GPT-4o mini</option>
+                                        <option value="gpt-4-turbo">GPT-4 Turbo</option>
+                                        <option value="gpt-4">GPT-4</option>
+                                        <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="border-b border-gray-200 pb-5">
+                                <h3 class="text-lg font-medium leading-6 text-gray-900">Claude</h3>
+                                <div class="mt-2 flex items-center">
+                                    <input type="password" id="claude-key" placeholder="API Key" class="flex-grow block px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                    <button type="button" onclick="togglePasswordVisibility('claude-key', this)" class="ml-2 inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                        View
+                                    </button>
+                                </div>
+                                <div class="mt-2">
+                                    <select id="claude-model" class="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                        <option value="claude-2.1">Claude 2.1</option>
+                                        <option value="claude-instant-1.2">Claude Instant 1.2</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="border-b border-gray-200 pb-5">
+                                <h3 class="text-lg font-medium leading-6 text-gray-900">Groq</h3>
+                                <div class="mt-2 flex items-center">
+                                    <input type="password" id="groq-key" placeholder="API Key" class="flex-grow block px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                    <button type="button" onclick="togglePasswordVisibility('groq-key', this)" class="ml-2 inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                        View
+                                    </button>
+                                </div>
+                                <div class="mt-2">
+                                    <select id="groq-model" class="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                        <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
+                                        <option value="llama2-70b-4096">LLaMA2 70B</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div>
+                                <h3 class="text-lg font-medium leading-6 text-gray-900">Gemini</h3>
+                                <div class="mt-2 flex items-center">
+                                    <input type="password" id="gemini-key" placeholder="API Key" class="flex-grow block px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                    <button type="button" onclick="togglePasswordVisibility('gemini-key', this)" class="ml-2 inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                        View
+                                    </button>
+                                </div>
+                                <div class="mt-2">
+                                    <select id="gemini-model" class="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                        <option value="gemini-pro">Gemini Pro</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="mt-6">
+                                <button type="submit" class="w-full inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                    Save All Settings
+                                </button>
+                            </div>
+                        </form>
+                        <div id="message" class="mt-4 text-sm text-gray-600"></div>
+                    </div>
+                </div>
+            `;
+
+            document.addEventListener('DOMContentLoaded', loadUserSettings);
+
+            document.getElementById('settingsForm').addEventListener('submit', function(e) {
+                e.preventDefault();
+                saveAllSettings();
+            });
+
+            function loadUserSettings() {
+                google.script.run
+                    .withSuccessHandler(populateForm)
+                    .withFailureHandler(error => showMessage('Error: ' + error.toString()))
+                    .getUserSettings();
+            }
+
+            function populateForm(settings) {
+                const models = ['CHATGPT', 'CLAUDE', 'GROQ', 'GEMINI'];
+                models.forEach(model => {
+                    const lowerModel = model.toLowerCase();
+                    if (settings[model]) {
+                        document.getElementById(`${lowerModel}-key`).value = settings[model].apiKey || '';
+                        document.getElementById(`${lowerModel}-model`).value = settings[model].defaultModel || '';
+                    }
+                });
+            }
+
+            function saveAllSettings() {
+                const models = ['CHATGPT', 'CLAUDE', 'GROQ', 'GEMINI'];
+                let settings = {};
+
+                models.forEach(model => {
+                    const key = document.getElementById(model.toLowerCase() + '-key').value;
+                    const defaultModel = document.getElementById(model.toLowerCase() + '-model').value;
+
+                    settings[model] = {
+                        apiKey: key,
+                        defaultModel: defaultModel
+                    };
+                });
+
+                google.script.run
+                    .withSuccessHandler(showMessage)
+                    .withFailureHandler(error => showMessage('Error: ' + error.toString()))
+                    .saveAllSettings(settings);
+            }
+
+            function showMessage(msg) {
+                var messageElement = document.getElementById('message');
+                messageElement.textContent = msg;
+                messageElement.classList.add('p-4', 'bg-green-100', 'text-green-700', 'rounded-md');
+                setTimeout(() => {
+                    messageElement.textContent = '';
+                    messageElement.classList.remove('p-4', 'bg-green-100', 'text-green-700', 'rounded-md');
+                }, 3000);
+            }
+
+            function togglePasswordVisibility(inputId, button) {
+                const input = document.getElementById(inputId);
+                if (input.type === 'password') {
+                    input.type = 'text';
+                    button.textContent = 'Hide';
+                } else {
+                    input.type = 'password';
+                    button.textContent = 'View';
+                }
+            }
+        }
+
+        function showPrivacy() {
+            const content = document.getElementById('content');
+            content.innerHTML = '<h2 class="text-lg font-bold">Privacy & Legal</h2><p>View our privacy policy and legal disclaimers.</p>';
+        }
     </script>
-  </body>
+</body>
 </html>

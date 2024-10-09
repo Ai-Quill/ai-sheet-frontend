@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <base target="_top">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.0.3/dist/tailwind.min.css">
+    <style>
+        .overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 50;
+            display: none;
+        }
+        .sidebar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 300px;
+            height: 100%;
+            background: white;
+            z-index: 100;
+            transform: translateX(-100%);
+            transition: transform 0.3s ease;
+        }
+        .sidebar.open {
+            transform: translateX(0);
+        }
+    </style>
+</head>
+<body class="bg-gray-100" onload="initializeSidebar()">
+    <div class="text-gray-800">
+        <div class="flex items-center justify-between p-4 border-b">
+            <h1 class="text-xl font-bold">AISheeter - Any LLM in One Google Sheets™</h1>
+            <button id="burgerMenu" class="md:hidden focus:outline-none">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7"></path>
+                </svg>
+            </button>
+        </div>
+        <div id="overlay" class="overlay" onclick="toggleMenu()"></div>
+        <div id="sidebar" class="sidebar">
+            <div class="p-4">
+                <button onclick="toggleMenu()" class="md:hidden focus:outline-none mb-4">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+                <button onclick="showHome()" class="w-full text-left py-2 px-4 bg-blue-500 text-white rounded mb-2">Home</button>
+                <button onclick="showHowToUse()" class="w-full text-left py-2 px-4 bg-blue-500 text-white rounded mb-2">How To Use</button>
+                <button onclick="showSettings()" class="w-full text-left py-2 px-4 bg-blue-500 text-white rounded mb-2">Settings</button>
+                <button onclick="showPrivacy()" class="w-full text-left py-2 px-4 bg-blue-500 text-white rounded">Privacy & Legal</button>
+            </div>
+        </div>
+        <div id="content" class="p-4">
+            <!-- Dynamic content will be loaded here -->
+        </div>
+    </div>
+
+    <script>
+        function initializeSidebar() {
+            showHome();
+        }
+
+        function toggleMenu() {
+            const sidebar = document.getElementById('sidebar');
+            const overlay = document.getElementById('overlay');
+            sidebar.classList.toggle('open');
+            overlay.style.display = sidebar.classList.contains('open') ? 'block' : 'none';
+        }
+
+        document.getElementById('burgerMenu').addEventListener('click', toggleMenu);
+
+        function showHome() {
+            toggleMenu();
+            const content = document.getElementById('content');
+            content.innerHTML = `
+                <h2 class="text-lg font-bold">Home</h2>
+                <div class="mt-2">
+                    <h4 class="text-md font-medium leading-6 text-gray-800 mb-1">Credit Usage Logs</h4>
+                    <pre id="logs" class="bg-gray-200 p-2 rounded-md text-sm overflow-auto max-h-60"></pre>
+                    <a href="#" onclick="showHowToUse()" class="text-blue-500 underline mt-4 block">How To Use</a>
+                </div>
+            `;
+            google.script.run.withSuccessHandler(function(logs) {
+                document.getElementById('logs').textContent = logs;
+            }).getCreditUsageLogs();
+
+            // Fetch models when showing home page
+            fetchModels();
+        }
+
+        function showHowToUse() {
+            toggleMenu();
+            const content = document.getElementById('content');
+            content.innerHTML = `
+                <h2 class="text-lg font-bold">How To Use</h2>
+                <div class="mt-2">
+                    <p>Welcome to the AI Assistant! Here's how to use the extension:</p>
+                    <ol class="list-decimal list-inside mt-2">
+                        <li>Open the sidebar by clicking on the "AI Assistant" menu.</li>
+                        <li>Navigate to the "Settings" section to configure your API keys and model preferences.</li>
+                        <li>Use the custom functions in your Google Sheets to interact with the AI models. For example, use <code>=ChatGPT("your prompt")</code> to get a response from ChatGPT.</li>
+                        <li>Check the "Home" section for logs and credit usage information.</li>
+                        <li>Refer to the "Privacy & Legal" section for information on how your data is handled.</li>
+                    </ol>
+                </div>
+            `;
+        }
+
+        function showSettings() {
+            toggleMenu();
+            const content = document.getElementById('content');
+            content.innerHTML = `
+                <h2 class="text-lg font-bold">Settings</h2>
+                <p>Manage your API keys and model configurations here.</p>
+                <form id="settingsForm" class="space-y-6">
+                    <div class="border-b border-gray-200 pb-5">
+                        <h3 class="text-lg font-medium leading-6 text-gray-900">ChatGPT</h3>
+                        <div class="mt-2 flex items-center">
+                            <input type="password" id="chatgpt-key" placeholder="API Key" class="flex-grow block px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            <button type="button" onclick="togglePasswordVisibility('chatgpt-key', this)" class="ml-2 inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                View
+                            </button>
+                        </div>
+                        <div class="mt-2">
+                            <select id="chatgpt-model" style="display: block !important; visibility: visible !important;">
+                                <!-- Options will be populated dynamically -->
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="border-b border-gray-200 pb-5">
+                        <h3 class="text-lg font-medium leading-6 text-gray-900">Claude</h3>
+                        <div class="mt-2 flex items-center">
+                            <input type="password" id="claude-key" placeholder="API Key" class="flex-grow block px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            <button type="button" onclick="togglePasswordVisibility('claude-key', this)" class="ml-2 inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                View
+                            </button>
+                        </div>
+                        <div class="mt-2">
+                            <select id="claude-model" style="display: block !important; visibility: visible !important;">
+                                <!-- Options will be populated dynamically -->
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="border-b border-gray-200 pb-5">
+                        <h3 class="text-lg font-medium leading-6 text-gray-900">Groq</h3>
+                        <div class="mt-2 flex items-center">
+                            <input type="password" id="groq-key" placeholder="API Key" class="flex-grow block px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            <button type="button" onclick="togglePasswordVisibility('groq-key', this)" class="ml-2 inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                View
+                            </button>
+                        </div>
+                        <div class="mt-2">
+                            <select id="groq-model" style="display: block !important; visibility: visible !important;">
+                                <!-- Options will be populated dynamically -->
+                            </select>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 class="text-lg font-medium leading-6 text-gray-900">Gemini</h3>
+                        <div class="mt-2 flex items-center">
+                            <input type="password" id="gemini-key" placeholder="API Key" class="flex-grow block px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            <button type="button" onclick="togglePasswordVisibility('gemini-key', this)" class="ml-2 inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                View
+                            </button>
+                        </div>
+                        <div class="mt-2">
+                            <select id="gemini-model" style="display: block !important; visibility: visible !important;">
+                                <!-- Options will be populated dynamically -->
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="mt-6">
+                        <button type="submit" class="w-full inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            Save All Settings
+                        </button>
+                    </div>
+                </form>
+                <div id="message" class="mt-4 text-sm text-gray-600"></div>
+            `;
+
+            document.getElementById('settingsForm').addEventListener('submit', function(e) {
+                e.preventDefault();
+                saveAllSettings();
+            });
+
+            loadUserSettings();
+            fetchModels();
+        }
+
+        function showPrivacy() {
+            toggleMenu();
+            const content = document.getElementById('content');
+            content.innerHTML = `
+                <h2 class="text-lg font-bold">Privacy & Legal</h2>
+                <div class="mt-2">
+                    <p>Your privacy is important to us. This section contains information about how we handle your data and our legal policies.</p>
+                    <p class="mt-2">For detailed information, please visit our website or contact our support team.</p>
+                </div>
+            `;
+        }
+
+        function loadUserSettings() {
+            google.script.run
+                .withSuccessHandler(function(settings) {
+                    populateForm(settings);
+                })
+                .withFailureHandler(error => {
+                    console.error('Error fetching user settings:', error);
+                    showMessage('Error: ' + error.toString());
+                })
+                .getUserSettings();
+        }
+
+        function populateForm(settings) {
+            const models = ['CHATGPT', 'CLAUDE', 'GROQ', 'GEMINI'];
+            models.forEach(model => {
+                const lowerModel = model.toLowerCase();
+                if (settings[model]) {
+                    document.getElementById(`${lowerModel}-key`).value = settings[model].apiKey || '';
+                    document.getElementById(`${lowerModel}-model`).value = settings[model].defaultModel || '';
+                }
+            });
+        }
+
+        function saveAllSettings() {
+            const models = ['CHATGPT', 'CLAUDE', 'GROQ', 'GEMINI'];
+            let settings = {};
+
+            models.forEach(model => {
+                const key = document.getElementById(model.toLowerCase() + '-key').value;
+                const defaultModel = document.getElementById(model.toLowerCase() + '-model').value;
+
+                settings[model] = {
+                    apiKey: key,
+                    defaultModel: defaultModel
+                };
+            });
+
+            google.script.run
+                .withSuccessHandler(showMessage)
+                .withFailureHandler(function(error) {
+                    console.error('Error in saveAllSettings:', error);
+                    showMessage('Error: ' + JSON.stringify(error));
+                })
+                .saveAllSettings(settings);
+        }
+
+        function showMessage(msg) {
+            var messageElement = document.getElementById('message');
+            messageElement.textContent = msg;
+            messageElement.classList.add('p-4', 'bg-green-100', 'text-green-700', 'rounded-md');
+            console.log('Message displayed:', msg);
+            setTimeout(() => {
+                messageElement.textContent = '';
+                messageElement.classList.remove('p-4', 'bg-green-100', 'text-green-700', 'rounded-md');
+            }, 5000); // Increased timeout to 5 seconds for better visibility
+        }
+
+        function togglePasswordVisibility(inputId, button) {
+            const input = document.getElementById(inputId);
+            if (input.type === 'password') {
+                input.type = 'text';
+                button.textContent = 'Hide';
+            } else {
+                input.type = 'password';
+                button.textContent = 'View';
+            }
+        }
+
+        function populateModelDropdowns(models) {
+            const modelDropdowns = {
+                CHATGPT: document.getElementById('chatgpt-model'),
+                CLAUDE: document.getElementById('claude-model'),
+                GROQ: document.getElementById('groq-model'),
+                GEMINI: document.getElementById('gemini-model')
+            };
+
+            Object.keys(modelDropdowns).forEach(llm => {
+                const dropdown = modelDropdowns[llm];
+                if (dropdown) {
+                    dropdown.innerHTML = ''; // Clear existing options
+                    const defaultOption = document.createElement('option');
+                    defaultOption.value = '';
+                    defaultOption.textContent = `Select a ${llm} model`;
+                    dropdown.appendChild(defaultOption);
+
+                    const filteredModels = models.filter(model => model.llm === llm);
+
+                    filteredModels.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model.name;
+                        option.textContent = `${model.display_name} - ${model.credit_price_per_token} credits/token`;
+                        dropdown.appendChild(option);
+                    });
+                } else {
+                    console.error(`Dropdown for ${llm} not found`);
+                }
+            });
+        }
+
+        function fetchModels() {
+            google.script.run
+                .withSuccessHandler(function(models) {
+                    populateModelDropdowns(models);
+                })
+                .withFailureHandler(function(error) {
+                    console.error('Error fetching models:', error);
+                })
+                .fetchModels();
+        }
+    </script>
+</body>
+</html>

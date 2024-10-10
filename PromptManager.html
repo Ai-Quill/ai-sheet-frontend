@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/add-ons1.css">
+    <script>
+      // Functions to interact with the backend via Google Apps Script
+      function loadPrompts() {
+        google.script.run.withSuccessHandler(displayPrompts).getSavedPrompts();
+      }
+      
+      function displayPrompts(prompts) {
+        // Populate the UI with saved prompts
+      }
+      
+      function saveNewPrompt() {
+        var name = document.getElementById('promptName').value;
+        var prompt = document.getElementById('promptText').value;
+        var variables = document.getElementById('promptVariables').value;
+        google.script.run.withSuccessHandler(loadPrompts).savePrompt(name, prompt, variables);
+      }
+      
+      // Add functions for updating and deleting prompts
+    </script>
+  </head>
+  <body onload="loadPrompts()">
+    <div class="sidebar">
+      <h3>Saved Prompts</h3>
+      <div id="promptList"></div>
+      <h3>Add New Prompt</h3>
+      <input type="text" id="promptName" placeholder="Prompt Name">
+      <textarea id="promptText" placeholder="Enter your prompt here"></textarea>
+      <input type="text" id="promptVariables" placeholder="Variable1,Variable2,Variable3">
+      <button onclick="saveNewPrompt()">Save Prompt</button>
+    </div>
+  </body>
+</html>

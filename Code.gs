@@ -6,6 +6,8 @@ function onOpen() {
     .addItem('Show Sidebar', 'showSidebar')
     // Remove the line below if it exists
     // .addItem('Test API Connection', 'testAPIConnection')
+    .addItem('Open Sidebar', 'openSidebar')
+    .addItem('Manage Saved Prompts', 'openPromptManager')
     .addToUi();
 Sheeter
   // Automatically show the sidebar when the spreadsheet is opened
@@ -273,4 +275,21 @@ function generateAndSetEncryptionSalt() {
   PropertiesService.getScriptProperties().setProperty('ENCRYPTION_SALT', salt);
   Logger.log('New encryption salt generated and set: ' + salt);
   return salt;
+}
+
+function getSavedPrompts() {
+  // Call your backend API to fetch saved prompts
+  // Return the prompts to the frontend
+}
+
+function savePrompt(name, prompt, variables) {
+  // Call your backend API to save a new prompt
+}
+
+function updatePrompt(id, name, prompt, variables) {
+  // Call your backend API to update an existing prompt
+}
+
+function deletePrompt(id) {
+  // Call your backend API to delete a prompt
 }

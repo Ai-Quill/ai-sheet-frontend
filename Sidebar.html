@@ -316,6 +316,40 @@
                 })
                 .fetchModels();
         }
+
+        // Add this to your existing sidebar HTML
+        <select id="savedPrompts" onchange="loadSavedPrompt()">
+          <option value="">Select a saved prompt</option>
+          <!-- This will be populated dynamically -->
+        </select>
+
+        function loadSavedPrompts() {
+          google.script.run.withSuccessHandler(populateSavedPrompts).getSavedPrompts();
+        }
+        
+        function populateSavedPrompts(prompts) {
+          var select = document.getElementById('savedPrompts');
+          prompts.forEach(function(prompt) {
+            var option = document.createElement('option');
+            option.value = prompt.id;
+            option.text = prompt.name;
+            select.appendChild(option);
+          });
+        }
+        
+        function loadSavedPrompt() {
+          var promptId = document.getElementById('savedPrompts').value;
+          if (promptId) {
+            google.script.run.withSuccessHandler(fillPromptFields).getPromptById(promptId);
+          }
+        }
+        
+        function fillPromptFields(prompt) {
+          // Fill the prompt text and variables in the UI
+        }
+        
+        // Call this when the sidebar loads
+        loadSavedPrompts();
     </script>
 </body>
 </html>

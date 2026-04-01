@@ -1,0 +1,167 @@
+<!--
+  @file Sidebar_Agent_TaskChain_Context.html
+  @version 1.0.0
+  @created 2026-02-05
+  
+  TASK CHAIN - Context Enhancement Module
+  
+  Contains:
+  - Context building for AI
+  - Header/data row detection
+  - Selection info enhancement
+  
+  Depends on: Sidebar_Agent_TaskChain_State.html
+-->
+
+<script>
+// ============================================
+// CONTEXT ENHANCEMENT FOR AI
+// ============================================
+
+/**
+ * Build enhanced context with explicit header/data row information
+ * This makes it easy for the backend AI to determine correct ranges
+ * 
+ * PRINCIPLE: Give AI better context rather than hardcoding fixes
+ * 
+ * KEY FIX: Use columnsWithData to build full data range, not just the
+ * single-column dataRange from auto-detection
+ * 
+ * @param {Object} context - The raw selection context
+ * @return {Object} Enhanced context with explicit row information
+ */
+function buildEnhancedContext(context) {
+  if (!context) return {};
+  
+  const enhanced = { ...context };
+  const selInfo = context.selectionInfo;
+  
+  if (!selInfo) return enhanced;
+  
+  // Use columnsWithData to determine the full column span
+  const columnsWithData = selInfo.columnsWithData || [];
+  const emptyColumns = (selInfo.emptyColumns || []).map(c => typeof c === 'object' ? c.column : c);
+  
+  // Determine start/end columns from actual data columns
+  let startCol = 'A';
+  let endCol = 'A';
+  
+  if (columnsWithData.length > 0) {
+    startCol = columnsWithData[0];
+    endCol = columnsWithData[columnsWithData.length - 1];
+  } else if (selInfo.dataRange) {
+    // Fallback: parse from dataRange if no columnsWithData
+    const rangeMatch = selInfo.dataRange.match(/([A-Z]+)\d+:([A-Z]+)\d+/);
+    if (rangeMatch) {
+      startCol = rangeMatch[1];
+      endCol = rangeMatch[2];
+    }
+  }
+  
+  // Get row information from selectionInfo or dataRange
+  let dataStartRow = selInfo.dataStartRow || 2;
+  let dataEndRow = selInfo.dataEndRow || 100;
+  
+  // If we have dataRange, parse row numbers from it
+  if (selInfo.dataRange) {
+    const rowMatch = selInfo.dataRange.match(/[A-Z]+(\d+):[A-Z]+(\d+)/);
+    if (rowMatch) {
+      dataStartRow = Math.max(parseInt(rowMatch[1]), selInfo.dataStartRow || 2);
+      dataEndRow = parseInt(rowMatch[2]);
+    }
+  }
+  
+  // Use headerRow from selectionInfo if available (might not be row 1)
+  const headerRowNum = selInfo.headerRow || 1;
+  
+  // Make row information explicit for AI
+  enhanced.headerRowNumber = headerRowNum;
+  enhanced.headerRange = `${startCol}${headerRowNum}:${endCol}${headerRowNum}`;
+  enhanced.dataStartRow = dataStartRow;
+  enhanced.dataEndRow = dataEndRow;
+  enhanced.dataRange = `${startCol}${dataStartRow}:${endCol}${dataEndRow}`;
+  enhanced.totalRowCount = dataEndRow - dataStartRow + 1;
+  enhanced.columnsWithData = columnsWithData;
+  enhanced.emptyColumns = emptyColumns;
+  
+  // Build explicitRowInfo for the backend (used by legacy path's prompt builder)
+  const headerNames = (selInfo.headers || [])
+    .filter(h => h && h.column && h.name)
+    .map(h => ({ column: h.column, name: h.name }));
+  
+  enhanced.explicitRowInfo = {
+    headerRowNumber: headerRowNum,
+    headerRange: `${startCol}${headerRowNum}:${endCol}${headerRowNum}`,
+    dataStartRow: dataStartRow,
+    dataEndRow: dataEndRow,
+    dataRange: `${startCol}${dataStartRow}:${endCol}${dataEndRow}`,
+    fullRangeIncludingHeader: `${startCol}${headerRowNum}:${endCol}${dataEndRow}`,
+    headerNames: headerNames.length > 0 ? headerNames : undefined
+  };
+  
+  console.log('🔗 [TaskChain] Enhanced context with explicit row info:', {
+    headerRowNumber: enhanced.headerRowNumber,
+    headerRange: enhanced.headerRange,
+    dataStartRow: enhanced.dataStartRow,
+    dataEndRow: enhanced.dataEndRow,
+    dataRange: enhanced.dataRange,
+    totalRowCount: enhanced.totalRowCount,
+    columnsWithData: columnsWithData.join(','),
+    emptyColumns: emptyColumns.slice(0, 5).join(',')
+  });
+  
+  return enhanced;
+}
+
+/**
+ * Get selection context with fallbacks
+ * Both currentSelectionContext and window.currentContext should be in sync,
+ * but check both as a safety measure.
+ * @returns {Object} Selection context
+ */
+function getSelectionContext() {
+  // Try synced global first
+  if (window.currentContext?.selectionInfo) {
+    return window.currentContext;
+  }
+  
+  // Try module-level context (might be more recent)
+  if (currentSelectionContext?.selectionInfo) {
+    // Sync it
+    window.currentContext = currentSelectionContext;
+    return currentSelectionContext;
+  }
+  
+  // Fallback to empty context
+  return {
+    selectionInfo: null,
+    headers: [],
+    headerRow: {},
+    columnDataRanges: {},
+    sampleData: {}
+  };
+}
+
+/**
+ * Validate that we have sufficient context for execution
+ * @param {Object} context - Selection context
+ * @returns {Object} { valid: boolean, reason: string }
+ */
+function validateContext(context) {
+  if (!context) {
+    return { valid: false, reason: 'No context available' };
+  }
+  
+  if (!context.selectionInfo) {
+    return { valid: false, reason: 'No selection info - please select data first' };
+  }
+  
+  if (!context.selectionInfo.dataRange) {
+    return { valid: false, reason: 'No data range detected' };
+  }
+  
+  return { valid: true, reason: 'Context is valid' };
+}
+
+console.log('📦 Agent TaskChain Context module loaded');
+</script>

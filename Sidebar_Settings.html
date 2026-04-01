@@ -1,0 +1,485 @@
+<!--
+  @file Sidebar_Settings.html
+  @version 2.2.0
+  @updated 2026-01-10
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 2.2.0 (2026-01-10): Extracted from monolithic Sidebar.html
+  - 2.0.0 (2026-01-09): Initial settings implementation
+  
+  ============================================
+  SIDEBAR_SETTINGS.html - Settings Module
+  ============================================
+  
+  User settings and configuration forms:
+  - API key management
+  - Model selection
+  - Contact form
+  - Privacy/legal pages
+  
+  Included by: Sidebar.html
+  Usage: include('Sidebar_Settings')
+  
+  Dependencies:
+  - Sidebar_Utils.html (showToast)
+  - User.gs (server functions)
+-->
+
+<script>
+// ============================================
+// SETTINGS PAGE
+// ============================================
+
+function showSettings() {
+  setActiveTab('tab-settings');
+  const content = document.getElementById('content');
+  content.innerHTML = `
+    <div class="space-y-3 animate-in">
+      <div>
+        <h2 class="font-semibold text-sm">Settings</h2>
+        <p class="text-xs text-gray-500">Manage your API keys</p>
+      </div>
+
+      <form id="settingsForm" class="space-y-3">
+        <!-- ChatGPT -->
+        <div class="card p-3 space-y-2">
+          <div class="flex items-center gap-2">
+            <span class="text-sm">🧠</span>
+            <span class="font-medium text-sm">ChatGPT</span>
+          </div>
+          <div>
+            <label class="label">API Key</label>
+            <div class="flex gap-2">
+              <input type="password" id="chatgpt-key" placeholder="sk-..." class="input flex-1">
+              <button type="button" onclick="togglePassword('chatgpt-key', this)" class="btn btn-outline btn-sm">👁</button>
+            </div>
+          </div>
+          <div>
+            <label class="label">Default Model</label>
+            <select id="chatgpt-model" class="select"></select>
+          </div>
+        </div>
+
+        <!-- Claude -->
+        <div class="card p-3 space-y-2">
+          <div class="flex items-center gap-2">
+            <span class="text-sm">🤖</span>
+            <span class="font-medium text-sm">Claude</span>
+          </div>
+          <div>
+            <label class="label">API Key</label>
+            <div class="flex gap-2">
+              <input type="password" id="claude-key" placeholder="sk-ant-..." class="input flex-1">
+              <button type="button" onclick="togglePassword('claude-key', this)" class="btn btn-outline btn-sm">👁</button>
+            </div>
+          </div>
+          <div>
+            <label class="label">Default Model</label>
+            <select id="claude-model" class="select"></select>
+          </div>
+        </div>
+
+        <!-- Groq -->
+        <div class="card p-3 space-y-2">
+          <div class="flex items-center gap-2">
+            <span class="text-sm">⚡</span>
+            <span class="font-medium text-sm">Groq</span>
+          </div>
+          <div>
+            <label class="label">API Key</label>
+            <div class="flex gap-2">
+              <input type="password" id="groq-key" placeholder="gsk_..." class="input flex-1">
+              <button type="button" onclick="togglePassword('groq-key', this)" class="btn btn-outline btn-sm">👁</button>
+            </div>
+          </div>
+          <div>
+            <label class="label">Default Model</label>
+            <select id="groq-model" class="select"></select>
+          </div>
+        </div>
+
+        <!-- Gemini -->
+        <div class="card p-3 space-y-2">
+          <div class="flex items-center gap-2">
+            <span class="text-sm">🌐</span>
+            <span class="font-medium text-sm">Gemini</span>
+          </div>
+          <div>
+            <label class="label">API Key</label>
+            <div class="flex gap-2">
+              <input type="password" id="gemini-key" placeholder="AI..." class="input flex-1">
+              <button type="button" onclick="togglePassword('gemini-key', this)" class="btn btn-outline btn-sm">👁</button>
+            </div>
+          </div>
+          <div>
+            <label class="label">Default Model</label>
+            <select id="gemini-model" class="select"></select>
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary w-full">
+          Save All Settings
+        </button>
+      </form>
+
+      <div id="message"></div>
+    </div>
+  `;
+
+  document.getElementById('settingsForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    saveAllSettings();
+  });
+
+  loadUserSettings();
+  fetchModels();
+}
+
+// ============================================
+// SETTINGS HELPERS
+// ============================================
+
+function loadUserSettings() {
+  google.script.run
+    .withSuccessHandler(function(settings) {
+      populateSettingsForm(settings);
+    })
+    .withFailureHandler(function(err) {
+      console.error('Error loading settings:', err);
+    })
+    .getUserSettings();
+}
+
+function populateSettingsForm(settings) {
+  const models = ['CHATGPT', 'CLAUDE', 'GROQ', 'GEMINI'];
+  models.forEach(model => {
+    const lower = model.toLowerCase();
+    if (settings[model]) {
+      const keyInput = document.getElementById(`${lower}-key`);
+      const modelSelect = document.getElementById(`${lower}-model`);
+      if (keyInput) keyInput.value = settings[model].apiKey || '';
+      if (modelSelect) modelSelect.value = settings[model].defaultModel || '';
+    }
+  });
+}
+
+function saveAllSettings() {
+  const models = ['CHATGPT', 'CLAUDE', 'GROQ', 'GEMINI'];
+  let settings = {};
+
+  models.forEach(model => {
+    const lower = model.toLowerCase();
+    settings[model] = {
+      apiKey: document.getElementById(`${lower}-key`)?.value || '',
+      defaultModel: document.getElementById(`${lower}-model`)?.value || ''
+    };
+  });
+
+  google.script.run
+    .withSuccessHandler(function() {
+      showToast('Settings saved!', 'success');
+    })
+    .withFailureHandler(function(err) {
+      showToast('Failed to save settings', 'error');
+    })
+    .saveAllSettings(settings);
+}
+
+function fetchModels() {
+  google.script.run
+    .withSuccessHandler(function(models) {
+      populateModelDropdowns(models);
+    })
+    .withFailureHandler(function(err) {
+      console.error('Error fetching models:', err);
+    })
+    .fetchModels();
+}
+
+function populateModelDropdowns(models) {
+  const dropdowns = {
+    CHATGPT: document.getElementById('chatgpt-model'),
+    CLAUDE: document.getElementById('claude-model'),
+    GROQ: document.getElementById('groq-model'),
+    GEMINI: document.getElementById('gemini-model')
+  };
+
+  Object.keys(dropdowns).forEach(llm => {
+    const dropdown = dropdowns[llm];
+    if (!dropdown) return;
+    
+    dropdown.innerHTML = '<option value="">Select model</option>';
+    const filtered = models.filter(m => m.llm === llm);
+    
+    filtered.forEach(model => {
+      const option = document.createElement('option');
+      option.value = model.name;
+      option.textContent = model.display_name;
+      dropdown.appendChild(option);
+    });
+  });
+
+  // Re-populate with saved values
+  loadUserSettings();
+}
+
+function togglePassword(inputId, btn) {
+  const input = document.getElementById(inputId);
+  if (input.type === 'password') {
+    input.type = 'text';
+    btn.textContent = '🙈';
+  } else {
+    input.type = 'password';
+    btn.textContent = '👁';
+  }
+}
+
+// ============================================
+// HOW TO USE PAGE
+// ============================================
+
+function showHowToUse() {
+  setActiveTab(null);
+  const content = document.getElementById('content');
+  content.innerHTML = `
+    <div class="space-y-3 animate-in">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">How to Use</h3>
+          <p class="card-description">Get started in seconds</p>
+        </div>
+        <div class="card-content">
+          <ol class="space-y-2 text-xs">
+            <li class="flex gap-2">
+              <span class="font-bold text-blue-600">1.</span>
+              <span>Go to Settings and add your API keys</span>
+            </li>
+            <li class="flex gap-2">
+              <span class="font-bold text-blue-600">2.</span>
+              <span>Type a formula like <code>=ChatGPT("hello")</code></span>
+            </li>
+            <li class="flex gap-2">
+              <span class="font-bold text-blue-600">3.</span>
+              <span>Press Enter and wait for the AI response</span>
+            </li>
+            <li class="flex gap-2">
+              <span class="font-bold text-blue-600">4.</span>
+              <span>Drag the formula to apply to other cells</span>
+            </li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="card p-3">
+        <h4 class="font-medium text-xs mb-2">📷 Image Analysis</h4>
+        <p class="text-xs text-gray-600 mb-2">Add an image URL as the second parameter:</p>
+        <div class="p-2 bg-gray-50 rounded-md">
+          <code>=ChatGPT("Describe this", A1)</code>
+        </div>
+      </div>
+
+      <button onclick="showAgent()" class="btn btn-outline w-full">
+        ← Back to Agent
+      </button>
+    </div>
+  `;
+}
+
+// ============================================
+// PRIVACY PAGE
+// ============================================
+
+function showPrivacy() {
+  setActiveTab(null);
+  const content = document.getElementById('content');
+  content.innerHTML = `
+    <div class="space-y-3 animate-in">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">Privacy & Legal</h3>
+        </div>
+        <div class="card-content text-xs text-gray-600 space-y-2">
+          <p>Your API keys are encrypted and stored securely. We never access your spreadsheet data except when you explicitly call our functions.</p>
+          <p>All AI requests go directly to the respective providers (OpenAI, Anthropic, Google, Groq).</p>
+          <p>For details, visit our <a href="https://aisheet.vercel.app/privacy" target="_blank" class="text-blue-600 underline">Privacy Policy</a>.</p>
+        </div>
+      </div>
+      <button onclick="showAgent()" class="btn btn-outline w-full">← Back</button>
+    </div>
+  `;
+}
+
+// ============================================
+// CONTACT & SUPPORT PAGE
+// ============================================
+
+function showContact() {
+  setActiveTab(null);
+  const content = document.getElementById('content');
+  
+  // Pre-fill email if we have it
+  google.script.run
+    .withSuccessHandler(function(email) {
+      const emailInput = document.getElementById('contactEmail');
+      if (emailInput && email) {
+        emailInput.value = email;
+      }
+    })
+    .getUserEmail();
+  
+  content.innerHTML = `
+    <div class="space-y-4 animate-in p-2">
+      <!-- Header -->
+      <div class="text-center py-3">
+        <div class="text-3xl mb-2">💬</div>
+        <h2 class="text-base font-semibold text-gray-900">Get in Touch</h2>
+        <p class="text-xs text-gray-500 mt-1">We'd love to hear from you</p>
+      </div>
+      
+      <!-- Quick Support Options -->
+      <div class="grid grid-cols-2 gap-2">
+        <button onclick="setContactCategory('bug')" class="card p-3 text-center hover:border-blue-300 transition-colors category-btn" data-category="bug">
+          <div class="text-xl mb-1">🐛</div>
+          <div class="text-xs font-medium">Report Bug</div>
+        </button>
+        <button onclick="setContactCategory('feature')" class="card p-3 text-center hover:border-blue-300 transition-colors category-btn" data-category="feature">
+          <div class="text-xl mb-1">💡</div>
+          <div class="text-xs font-medium">Feature Request</div>
+        </button>
+        <button onclick="setContactCategory('support')" class="card p-3 text-center hover:border-blue-300 transition-colors category-btn" data-category="support">
+          <div class="text-xl mb-1">🆘</div>
+          <div class="text-xs font-medium">Need Help</div>
+        </button>
+        <button onclick="setContactCategory('feedback')" class="card p-3 text-center hover:border-blue-300 transition-colors category-btn" data-category="feedback">
+          <div class="text-xl mb-1">⭐</div>
+          <div class="text-xs font-medium">Feedback</div>
+        </button>
+      </div>
+
+      <!-- Contact Form -->
+      <form id="contactForm" class="space-y-3">
+        <input type="hidden" id="contactCategory" value="general">
+        
+        <div>
+          <label class="text-xs font-medium text-gray-700 mb-1 block">Your Email</label>
+          <input type="email" id="contactEmail" required 
+            class="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-colors"
+            placeholder="you@example.com">
+        </div>
+        
+        <div>
+          <label class="text-xs font-medium text-gray-700 mb-1 block">Subject</label>
+          <input type="text" id="contactSubject" required 
+            class="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-colors"
+            placeholder="Brief description">
+        </div>
+        
+        <div>
+          <label class="text-xs font-medium text-gray-700 mb-1 block">Message</label>
+          <textarea id="contactMessage" required rows="4"
+            class="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-colors resize-none"
+            placeholder="Tell us more..."></textarea>
+        </div>
+        
+        <button type="submit" id="contactSubmitBtn"
+          class="w-full h-10 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors text-sm">
+          Send Message
+        </button>
+      </form>
+
+      <div id="contactStatus"></div>
+      
+      <!-- Quick Links -->
+      <div class="pt-2 border-t border-gray-100">
+        <p class="text-[11px] text-gray-400 text-center mb-2">Or reach us directly</p>
+        <div class="flex justify-center gap-4">
+          <a href="mailto:support@aisheeter.com" class="text-xs text-blue-600 hover:underline">📧 Email</a>
+          <a href="https://aisheeter.com" target="_blank" class="text-xs text-blue-600 hover:underline">🌐 Website</a>
+        </div>
+      </div>
+
+      <!-- Back Button -->
+      <button onclick="showAgent()" class="w-full text-sm text-gray-500 hover:text-gray-700 py-2">
+        ← Back to Agent
+      </button>
+    </div>
+  `;
+
+  document.getElementById('contactForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    submitContactForm();
+  });
+}
+
+/**
+ * Set contact category and highlight button
+ */
+function setContactCategory(category) {
+  document.getElementById('contactCategory').value = category;
+  
+  // Update button styles
+  document.querySelectorAll('.category-btn').forEach(btn => {
+    btn.classList.remove('border-blue-500', 'bg-blue-50');
+  });
+  
+  const activeBtn = document.querySelector(`[data-category="${category}"]`);
+  if (activeBtn) {
+    activeBtn.classList.add('border-blue-500', 'bg-blue-50');
+  }
+  
+  // Pre-fill subject based on category
+  const subjects = {
+    bug: '🐛 Bug Report: ',
+    feature: '💡 Feature Request: ',
+    support: '🆘 Help Needed: ',
+    feedback: '⭐ Feedback: '
+  };
+  
+  const subjectInput = document.getElementById('contactSubject');
+  if (subjectInput && subjects[category]) {
+    subjectInput.value = subjects[category];
+    subjectInput.focus();
+  }
+}
+
+/**
+ * Submit contact form
+ */
+function submitContactForm() {
+  const btn = document.getElementById('contactSubmitBtn');
+  const originalText = btn.textContent;
+  btn.textContent = 'Sending...';
+  btn.disabled = true;
+  
+  const category = document.getElementById('contactCategory').value;
+  const email = document.getElementById('contactEmail').value;
+  const subject = document.getElementById('contactSubject').value;
+  const message = document.getElementById('contactMessage').value;
+  
+  // Combine subject and message
+  const fullMessage = `[${category.toUpperCase()}] ${subject}\n\n${message}`;
+
+  google.script.run
+    .withSuccessHandler(function() {
+      showToast('Message sent! We\'ll get back to you soon 🎉', 'success');
+      document.getElementById('contactForm').reset();
+      btn.textContent = '✓ Sent!';
+      btn.classList.remove('bg-blue-600');
+      btn.classList.add('bg-green-600');
+      
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.classList.remove('bg-green-600');
+        btn.classList.add('bg-blue-600');
+        btn.disabled = false;
+      }, 2000);
+    })
+    .withFailureHandler(function(err) {
+      showToast('Failed to send. Try emailing us directly.', 'error');
+      btn.textContent = originalText;
+      btn.disabled = false;
+    })
+    .submitContactForm(email, email, fullMessage);
+}
+</script>

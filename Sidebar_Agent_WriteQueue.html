@@ -1,0 +1,620 @@
+<!--
+  @file Sidebar_Agent_WriteQueue.html
+  @version 1.0.0
+  @updated 2026-01-21
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-21): Extracted from Sidebar_Agent_Execution.html
+    - Write queue management
+    - Empty results handling & retry system
+    - Result fetching with progressive retry
+  
+  ============================================
+  SIDEBAR_AGENT_WRITEQUEUE - Write Queue Module
+  ============================================
+  
+  Contains:
+  - queueWrite(), processWriteQueue() - Queue management
+  - handleEmptyResultsDecision() - Empty results modal handler
+  - retryFailedRowsForColumn(), pollRetryJob() - Retry system
+  - mergeRetryResults() - Result merging
+  - proceedWithWrite() - Write execution
+  - fetchMissingResults(), fetchJobResults() - Result fetching
+  - waitForWriteQueue() - Queue completion waiting
+  
+  Dependencies:
+  - writeQueue, isWriting, writtenColumns (defined in Sidebar_Agent_Execution.html)
+  - showEmptyResultsWarning() (defined in Sidebar_Agent_UI.html)
+  - updateColumnStatus() (defined in Sidebar_Agent_Execution.html)
+  - showToast() (defined in Sidebar_Utils.html)
+  - currentPlan, collectedResults (shared state)
+  
+  Included by: Sidebar.html (after Sidebar_Agent_Execution.html)
+-->
+
+<script>
+// ============================================
+// WRITE QUEUE MANAGEMENT
+// ============================================
+
+/**
+ * Add results to write queue
+ * Queue ensures sequential writes to avoid race conditions
+ */
+function queueWrite(results, column, startRow, onSuccess, onError) {
+  writeQueue.push({ results, column, startRow, onSuccess, onError });
+  processWriteQueue();
+}
+
+/**
+ * Process the write queue sequentially
+ */
+function processWriteQueue() {
+  if (isWriting || writeQueue.length === 0) return;
+  
+  isWriting = true;
+  const { results, column, startRow, onSuccess, onError } = writeQueue.shift();
+  
+  console.log('Processing write queue: column ' + column + ' (' + results.length + ' rows), ' + writeQueue.length + ' remaining');
+  
+  google.script.run
+    .withSuccessHandler(function(writeResult) {
+      if (writeResult && writeResult.errorCount > 0) {
+        console.warn('Partial write to column ' + column + ': ' + writeResult.successCount + ' success, ' + writeResult.errorCount + ' validation errors');
+        writeResult.errors?.forEach(err => {
+          console.warn('  Row ' + err.row + ': ' + err.error);
+        });
+        if (onSuccess) onSuccess({ partial: true, ...writeResult });
+      } else {
+        console.log('Results written to column ' + column);
+        if (onSuccess) onSuccess();
+      }
+      isWriting = false;
+      processWriteQueue();
+    })
+    .withFailureHandler(function(err) {
+      console.error('Failed to write to column ' + column + ':', err);
+      isWriting = false;
+      if (onError) onError(err);
+      processWriteQueue();
+    })
+    .writeJobResults(results, column, startRow);
+}
+
+/**
+ * Wait for write queue to complete before callback
+ */
+function waitForWriteQueue(callback) {
+  if (!isWriting && writeQueue.length === 0) {
+    callback();
+    return;
+  }
+  console.log('Waiting for write queue to finish... (' + writeQueue.length + ' pending)');
+  setTimeout(function() {
+    waitForWriteQueue(callback);
+  }, 300);
+}
+
+// ============================================
+// EMPTY RESULTS HANDLING
+// ============================================
+
+// Threshold: Only warn if empty results exceed this percentage
+const EMPTY_RESULTS_WARNING_THRESHOLD = 0.1; // 10%
+
+/**
+ * Handle user decision for empty results
+ * Shows modal if significant empty results, otherwise proceeds silently
+ */
+function handleEmptyResultsDecision(results, emptyResults, col, startRow, completedJobs, jobId) {
+  const emptyPercent = emptyResults.length / results.length;
+  
+  // Only show warning if empty results exceed threshold
+  if (emptyPercent <= EMPTY_RESULTS_WARNING_THRESHOLD) {
+    console.log('📝 Column ' + col + ': ' + emptyResults.length + '/' + results.length + ' empty (' + 
+      Math.round(emptyPercent * 100) + '%) - below threshold, writing anyway');
+    showToast('Column ' + col + ': ' + emptyResults.length + ' row(s) empty', 'warning');
+    proceedWithWrite(results, col, startRow, completedJobs, jobId);
+    return;
+  }
+  
+  // Show warning modal and wait for user decision
+  if (typeof showEmptyResultsWarning === 'function') {
+    showEmptyResultsWarning(col, emptyResults, results.length).then(function(choice) {
+      console.log('📝 User chose "' + choice + '" for column ' + col + ' empty results');
+      
+      switch(choice) {
+        case 'retry':
+          retryFailedRowsForColumn(results, emptyResults, col, startRow, completedJobs, jobId);
+          break;
+          
+        case 'write':
+          console.log('Writing all ' + results.length + ' results (including ' + emptyResults.length + ' empty)');
+          proceedWithWrite(results, col, startRow, completedJobs, jobId);
+          break;
+          
+        case 'skip':
+          const filteredResults = results.filter(function(r) {
+            return r.output && String(r.output).trim() !== '';
+          });
+          console.log('Writing ' + filteredResults.length + ' non-empty results (skipping ' + emptyResults.length + ' empty)');
+          if (filteredResults.length > 0) {
+            proceedWithWrite(filteredResults, col, startRow, completedJobs, jobId);
+          } else {
+            updateColumnStatus(col, '⚠ All empty', 'text-yellow-600');
+            completedJobs.add(jobId);
+            showToast('Column ' + col + ': All results were empty, nothing written', 'warning');
+          }
+          break;
+          
+        case 'cancel':
+        case 'dismiss':
+          console.log('Cancelled writing column ' + col);
+          writtenColumns.delete(col);
+          updateColumnStatus(col, '⊘ Skipped', 'text-gray-500');
+          completedJobs.add(jobId);
+          showToast('Column ' + col + ' skipped by user', 'info');
+          break;
+          
+        default:
+          console.log('Unknown choice, defaulting to write');
+          proceedWithWrite(results, col, startRow, completedJobs, jobId);
+      }
+    }).catch(function(err) {
+      console.error('Warning modal error:', err);
+      proceedWithWrite(results, col, startRow, completedJobs, jobId);
+    });
+  } else {
+    showToast('Column ' + col + ': ' + emptyResults.length + ' row(s) empty - AI may have failed', 'warning');
+    proceedWithWrite(results, col, startRow, completedJobs, jobId);
+  }
+}
+
+// ============================================
+// RETRY SYSTEM
+// ============================================
+
+/**
+ * Retry only the failed (empty) rows for a column
+ */
+function retryFailedRowsForColumn(originalResults, emptyResults, col, startRow, completedJobs, jobId) {
+  const failedInputs = emptyResults
+    .map(function(r) { return { index: r.index, input: r.input }; })
+    .filter(function(r) { return r.input && String(r.input).trim(); });
+  
+  if (failedInputs.length === 0) {
+    console.warn('Cannot retry: No input data available for failed rows');
+    showToast('Cannot retry: Missing input data', 'error');
+    proceedWithWrite(originalResults, col, startRow, completedJobs, jobId);
+    return;
+  }
+  
+  console.log('🔄 Retrying ' + failedInputs.length + ' failed rows for column ' + col);
+  updateColumnStatus(col, '🔄 Retrying...', 'text-blue-600');
+  showToast('Retrying ' + failedInputs.length + ' failed rows for column ' + col, 'info');
+  
+  const prompt = currentPlan?.columnPrompts?.[col] || currentPlan?.prompt || '';
+  const model = currentPlan?.model || getAgentModel();
+  const specificModel = currentPlan?.specificModel;
+  
+  google.script.run
+    .withSuccessHandler(function(retryJob) {
+      if (!retryJob || !retryJob.id) {
+        console.error('Retry job creation failed');
+        showToast('Retry failed - writing original results', 'error');
+        proceedWithWrite(originalResults, col, startRow, completedJobs, jobId);
+        return;
+      }
+      
+      console.log('📤 Retry job created: ' + retryJob.id + ' for ' + failedInputs.length + ' rows');
+      pollRetryJob(retryJob.id, originalResults, emptyResults, col, startRow, completedJobs, jobId);
+    })
+    .withFailureHandler(function(err) {
+      console.error('Retry job creation error:', err);
+      showToast('Retry failed: ' + (err.message || 'Unknown error'), 'error');
+      proceedWithWrite(originalResults, col, startRow, completedJobs, jobId);
+    })
+    .createBulkJob(failedInputs.map(function(r) { return r.input; }), prompt, model, specificModel);
+}
+
+/**
+ * Poll for retry job completion and merge results
+ */
+function pollRetryJob(retryJobId, originalResults, emptyResults, col, startRow, completedJobs, originalJobId) {
+  const MAX_POLL_ATTEMPTS = 30;
+  const POLL_INTERVAL = 2000;
+  let pollCount = 0;
+  
+  function poll() {
+    pollCount++;
+    
+    google.script.run
+      .withSuccessHandler(function(job) {
+        if (job && (job.status === 'completed' || job.status === 'failed')) {
+          if (job.results && job.results.length > 0) {
+            console.log('✓ Retry job completed with ' + job.results.length + ' results');
+            
+            const mergedResults = mergeRetryResults(originalResults, job.results, emptyResults);
+            
+            const stillEmpty = mergedResults.filter(function(r) {
+              return !r.output || String(r.output).trim() === '';
+            });
+            
+            if (stillEmpty.length > 0) {
+              console.warn('⚠️ Still ' + stillEmpty.length + ' empty after retry');
+              showToast('Column ' + col + ': ' + stillEmpty.length + ' still empty after retry', 'warning');
+            } else {
+              showToast('Column ' + col + ': All rows filled after retry! ✓', 'success');
+            }
+            
+            proceedWithWrite(mergedResults, col, startRow, completedJobs, originalJobId);
+          } else {
+            console.warn('Retry job completed but no results');
+            showToast('Retry returned no results', 'warning');
+            proceedWithWrite(originalResults, col, startRow, completedJobs, originalJobId);
+          }
+        } else if (pollCount < MAX_POLL_ATTEMPTS) {
+          const percent = job?.progress || 0;
+          updateColumnStatus(col, '🔄 Retry ' + percent + '%', 'text-blue-600');
+          setTimeout(poll, POLL_INTERVAL);
+        } else {
+          console.warn('Retry job timed out after ' + MAX_POLL_ATTEMPTS + ' polls');
+          showToast('Retry timed out - writing original results', 'warning');
+          proceedWithWrite(originalResults, col, startRow, completedJobs, originalJobId);
+        }
+      })
+      .withFailureHandler(function(err) {
+        console.error('Retry poll error:', err);
+        if (pollCount < MAX_POLL_ATTEMPTS) {
+          setTimeout(poll, POLL_INTERVAL);
+        } else {
+          showToast('Retry failed - writing original results', 'error');
+          proceedWithWrite(originalResults, col, startRow, completedJobs, originalJobId);
+        }
+      })
+      .getJobStatus(retryJobId);
+  }
+  
+  poll();
+}
+
+/**
+ * Merge retry results into original results
+ */
+function mergeRetryResults(originalResults, retryResults, emptyResults) {
+  const merged = originalResults.map(function(r) { return Object.assign({}, r); });
+  const emptyIndices = emptyResults.map(function(r) { return r.index; });
+  
+  retryResults.forEach(function(retryResult, i) {
+    if (i < emptyIndices.length) {
+      const originalIndex = emptyIndices[i];
+      const targetResult = merged.find(function(r) { return r.index === originalIndex; });
+      
+      if (targetResult && retryResult.output && String(retryResult.output).trim()) {
+        console.log('  Merged retry result for index ' + originalIndex + ': "' + 
+          String(retryResult.output).substring(0, 30) + '..."');
+        targetResult.output = retryResult.output;
+        targetResult.retried = true;
+      }
+    }
+  });
+  
+  return merged;
+}
+
+// ============================================
+// WRITE EXECUTION
+// ============================================
+
+/**
+ * Proceed with writing results to column
+ */
+function proceedWithWrite(results, col, startRow, completedJobs, jobId) {
+  // Collect results for pattern learning
+  if (results && results.length > 0) {
+    collectedResults.outputs = results.map(r => r.output);
+    collectedResults.outputColumn = col;
+  }
+  
+  queueWrite(
+    results, 
+    col, 
+    startRow,
+    function(writeResult) {
+      console.log('✓ Column ' + col + ' write completed');
+      if (writeResult?.partial) {
+        updateColumnStatus(col, '⚠ ' + writeResult.successCount + '/' + (writeResult.successCount + writeResult.errorCount), 'text-yellow-600');
+        const bar = document.getElementById('colBar' + col);
+        if (bar) bar.classList.add('progress-bar-warning');
+        if (writeResult.errors?.length > 0) {
+          showToast(`Col ${col}: ${writeResult.errorCount} validation error(s)`, 'warning');
+        }
+      } else {
+        updateColumnStatus(col, '✓', 'text-green-600');
+        const bar = document.getElementById('colBar' + col);
+        if (bar) bar.classList.add('progress-bar-success');
+      }
+      completedJobs.add(jobId);
+    },
+    function(err) {
+      console.error('✗ Column ' + col + ' write failed:', err);
+      writtenColumns.delete(col);
+      updateColumnStatus(col, '✗ Failed', 'text-red-600');
+      showToast(`Col ${col}: ${err.message?.substring(0, 50) || 'Write failed'}`, 'error');
+    }
+  );
+}
+
+// ============================================
+// RESULT FETCHING
+// ============================================
+
+/**
+ * Fetch missing results for jobs that haven't written yet
+ * Uses progressive retry delays
+ */
+function fetchMissingResults(jobColumnMap, startRow, callback) {
+  const jobIds = Object.keys(jobColumnMap);
+  const missingColumns = jobIds.filter(id => !writtenColumns.has(jobColumnMap[id]));
+  
+  if (missingColumns.length === 0) {
+    console.log('All columns already written');
+    callback();
+    return;
+  }
+  
+  console.log('Fetching results for ' + missingColumns.length + ' unwritten jobs');
+  
+  let pending = missingColumns.length;
+  const MAX_RETRIES = 5;
+  const RETRY_DELAYS = [3000, 5000, 8000, 12000, 15000];
+  
+  function getRetryDelay(retryCount) {
+    return RETRY_DELAYS[Math.min(retryCount, RETRY_DELAYS.length - 1)];
+  }
+  
+  function fetchWithRetry(jobId, col, retryCount) {
+    google.script.run
+      .withSuccessHandler(function(job) {
+        if (job && job.results && job.results.length > 0 && !writtenColumns.has(col)) {
+          writtenColumns.add(col);
+          console.log('📥 Fetched ' + job.results.length + ' results for column ' + col + (retryCount > 0 ? ' (after ' + retryCount + ' retries)' : ''));
+          
+          // Check for empty results
+          const emptyResults = job.results.filter(function(r) {
+            return !r.output || String(r.output).trim() === '';
+          });
+          
+          const emptyPercent = emptyResults.length / job.results.length;
+          if (emptyResults.length > 0 && emptyPercent > EMPTY_RESULTS_WARNING_THRESHOLD && typeof showEmptyResultsWarning === 'function') {
+            console.warn('⚠️ Fetched column ' + col + ' has ' + emptyResults.length + '/' + job.results.length + ' empty results');
+            
+            showEmptyResultsWarning(col, emptyResults, job.results.length).then(function(choice) {
+              handleFetchedResultsChoice(choice, job.results, emptyResults, col, startRow, jobId, function() {
+                pending--;
+                if (pending === 0) callback();
+              });
+            }).catch(function() {
+              writeFetchedResults(job.results, col, startRow, function() {
+                pending--;
+                if (pending === 0) callback();
+              });
+            });
+          } else {
+            if (emptyResults.length > 0) {
+              showToast('Column ' + col + ': ' + emptyResults.length + ' row(s) empty', 'warning');
+            }
+            writeFetchedResults(job.results, col, startRow, function() {
+              pending--;
+              if (pending === 0) callback();
+            });
+          }
+        } else if (retryCount < MAX_RETRIES) {
+          const delay = getRetryDelay(retryCount);
+          console.log('⏳ Job ' + jobId.substring(0, 8) + ' (column ' + col + ') not ready, retrying in ' + (delay/1000) + 's... (' + (retryCount + 1) + '/' + MAX_RETRIES + ')');
+          setTimeout(function() {
+            fetchWithRetry(jobId, col, retryCount + 1);
+          }, delay);
+        } else {
+          console.warn('❌ No results for job ' + jobId + ' (column ' + col + ') after ' + MAX_RETRIES + ' retries');
+          updateColumnStatus(col, '⚠ No data', 'text-yellow-600');
+          showToast('Column ' + col + ': No data received after retries', 'warning');
+          pending--;
+          if (pending === 0) callback();
+        }
+      })
+      .withFailureHandler(function(err) {
+        if (retryCount < MAX_RETRIES) {
+          const delay = getRetryDelay(retryCount);
+          console.warn('Fetch failed for job ' + jobId + ', retrying in ' + (delay/1000) + 's... (' + (retryCount + 1) + '/' + MAX_RETRIES + ')');
+          setTimeout(function() {
+            fetchWithRetry(jobId, col, retryCount + 1);
+          }, delay);
+        } else {
+          console.error('Failed to fetch job ' + jobId + ' after ' + MAX_RETRIES + ' retries:', err);
+          updateColumnStatus(col, '⚠ Error', 'text-red-600');
+          pending--;
+          if (pending === 0) callback();
+        }
+      })
+      .getJobStatus(jobId);
+  }
+  
+  // Helper to handle user choice for fetched results
+  function handleFetchedResultsChoice(choice, results, emptyResults, col, startRow, jobId, onDone) {
+    console.log('📝 User chose "' + choice + '" for fetched column ' + col);
+    
+    switch(choice) {
+      case 'retry':
+        retryFailedRowsForColumnWithCallback(results, emptyResults, col, startRow, jobId, onDone);
+        break;
+        
+      case 'write':
+        writeFetchedResults(results, col, startRow, onDone);
+        break;
+        
+      case 'skip':
+        const filtered = results.filter(function(r) {
+          return r.output && String(r.output).trim() !== '';
+        });
+        if (filtered.length > 0) {
+          writeFetchedResults(filtered, col, startRow, onDone);
+        } else {
+          updateColumnStatus(col, '⚠ All empty', 'text-yellow-600');
+          onDone();
+        }
+        break;
+        
+      case 'cancel':
+      case 'dismiss':
+        writtenColumns.delete(col);
+        updateColumnStatus(col, '⊘ Skipped', 'text-gray-500');
+        onDone();
+        break;
+        
+      default:
+        writeFetchedResults(results, col, startRow, onDone);
+    }
+  }
+  
+  // Retry for fetched results with callback
+  function retryFailedRowsForColumnWithCallback(originalResults, emptyResults, col, startRow, jobId, onDone) {
+    const failedInputs = emptyResults
+      .map(function(r) { return { index: r.index, input: r.input }; })
+      .filter(function(r) { return r.input && String(r.input).trim(); });
+    
+    if (failedInputs.length === 0) {
+      console.warn('Cannot retry: No input data available');
+      showToast('Cannot retry: Missing input data', 'error');
+      writeFetchedResults(originalResults, col, startRow, onDone);
+      return;
+    }
+    
+    console.log('🔄 Retrying ' + failedInputs.length + ' failed rows for column ' + col);
+    updateColumnStatus(col, '🔄 Retrying...', 'text-blue-600');
+    
+    const prompt = currentPlan?.columnPrompts?.[col] || currentPlan?.prompt || '';
+    const model = currentPlan?.model || getAgentModel();
+    const specificModel = currentPlan?.specificModel;
+    
+    google.script.run
+      .withSuccessHandler(function(retryJob) {
+        if (!retryJob || !retryJob.id) {
+          showToast('Retry failed', 'error');
+          writeFetchedResults(originalResults, col, startRow, onDone);
+          return;
+        }
+        
+        pollRetryJobWithCallback(retryJob.id, originalResults, emptyResults, col, startRow, onDone);
+      })
+      .withFailureHandler(function(err) {
+        showToast('Retry failed: ' + (err.message || 'Unknown error'), 'error');
+        writeFetchedResults(originalResults, col, startRow, onDone);
+      })
+      .createBulkJob(failedInputs.map(function(r) { return r.input; }), prompt, model, specificModel);
+  }
+  
+  // Poll retry job with callback pattern
+  function pollRetryJobWithCallback(retryJobId, originalResults, emptyResults, col, startRow, onDone) {
+    const MAX_POLLS = 30;
+    const POLL_INTERVAL = 2000;
+    let pollCount = 0;
+    
+    function poll() {
+      pollCount++;
+      google.script.run
+        .withSuccessHandler(function(job) {
+          if (job && (job.status === 'completed' || job.status === 'failed')) {
+            if (job.results && job.results.length > 0) {
+              const merged = mergeRetryResults(originalResults, job.results, emptyResults);
+              writeFetchedResults(merged, col, startRow, onDone);
+            } else {
+              writeFetchedResults(originalResults, col, startRow, onDone);
+            }
+          } else if (pollCount < MAX_POLLS) {
+            updateColumnStatus(col, '🔄 Retry ' + (job?.progress || 0) + '%', 'text-blue-600');
+            setTimeout(poll, POLL_INTERVAL);
+          } else {
+            showToast('Retry timed out', 'warning');
+            writeFetchedResults(originalResults, col, startRow, onDone);
+          }
+        })
+        .withFailureHandler(function() {
+          if (pollCount < MAX_POLLS) {
+            setTimeout(poll, POLL_INTERVAL);
+          } else {
+            writeFetchedResults(originalResults, col, startRow, onDone);
+          }
+        })
+        .getJobStatus(retryJobId);
+    }
+    
+    poll();
+  }
+  
+  // Helper to write fetched results
+  function writeFetchedResults(results, col, startRow, onDone) {
+    queueWrite(
+      results, 
+      col, 
+      startRow,
+      function() {
+        updateColumnStatus(col, '✓', 'text-green-600');
+        onDone();
+      },
+      function(err) {
+        writtenColumns.delete(col);
+        updateColumnStatus(col, '⚠ Write failed', 'text-yellow-600');
+        onDone();
+      }
+    );
+  }
+  
+  missingColumns.forEach(function(jobId) {
+    const col = jobColumnMap[jobId];
+    fetchWithRetry(jobId, col, 0);
+  });
+}
+
+/**
+ * Fetch job results directly (simpler version)
+ */
+function fetchJobResults(jobId, col, startRow) {
+  google.script.run
+    .withSuccessHandler(function(job) {
+      if (job && job.results && job.results.length > 0) {
+        console.log('Fetched ' + job.results.length + ' results for column ' + col);
+        queueWrite(
+          job.results, 
+          col, 
+          startRow,
+          function() {
+            updateColumnStatus(col, '✓', 'text-green-600');
+            const bar = document.getElementById('colBar' + col);
+            if (bar) bar.classList.add('progress-bar-success');
+          },
+          function(err) {
+            writtenColumns.delete(col);
+            updateColumnStatus(col, '⚠ Write failed', 'text-yellow-600');
+          }
+        );
+      } else {
+        console.log('No results found for job ' + jobId);
+        updateColumnStatus(col, '✓ No data', 'text-green-600');
+      }
+    })
+    .withFailureHandler(function(err) {
+      console.error('Failed to fetch results for job ' + jobId + ':', err);
+      writtenColumns.delete(col);
+      updateColumnStatus(col, '⚠ Fetch failed', 'text-yellow-600');
+    })
+    .getJobStatus(jobId);
+}
+
+// ============================================
+// MODULE LOADED
+// ============================================
+
+console.log('📦 Agent WriteQueue module loaded');
+</script>

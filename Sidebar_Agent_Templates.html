@@ -1,0 +1,325 @@
+<!--
+  @file Sidebar_Agent_Templates.html
+  @version 1.0.0
+  @updated 2026-01-15
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-15): Initial agent templates
+  
+  ============================================
+  SIDEBAR_AGENT_TEMPLATES - Workflow Templates
+  ============================================
+  
+  Contains:
+  - Pre-built workflow templates
+  - Template categories
+  - One-click template application
+  - Template customization
+  
+  Included by: Sidebar_Agent.html
+  Depends on: Sidebar_Agent_Core.html
+-->
+
+<script>
+// ============================================
+// TEMPLATE DEFINITIONS
+// ============================================
+
+const AGENT_TEMPLATES = [
+  // Sales & Marketing
+  {
+    id: 'lead-qualify',
+    category: 'Sales',
+    icon: '🎯',
+    name: 'Qualify Leads',
+    description: 'Score and categorize sales leads',
+    command: 'Qualify these leads into Hot, Warm, or Cold based on company size, industry fit, and engagement signals',
+    steps: ['Analyze company info', 'Score fit (1-10)', 'Categorize as Hot/Warm/Cold'],
+    popular: true
+  },
+  {
+    id: 'email-personalize',
+    category: 'Sales',
+    icon: '✉️',
+    name: 'Personalize Emails',
+    description: 'Generate personalized outreach',
+    command: 'Write a personalized cold email intro for each prospect based on their company and role',
+    steps: ['Extract key details', 'Generate personalized hook', 'Write intro paragraph']
+  },
+  {
+    id: 'competitor-analyze',
+    category: 'Sales',
+    icon: '🔍',
+    name: 'Analyze Competitors',
+    description: 'Extract competitor insights',
+    command: 'Analyze competitor descriptions and extract their main value proposition, target market, and key features',
+    steps: ['Parse description', 'Extract value prop', 'Identify target market']
+  },
+  
+  // Support
+  {
+    id: 'ticket-triage',
+    category: 'Support',
+    icon: '🎫',
+    name: 'Triage Tickets',
+    description: 'Categorize and prioritize support tickets',
+    command: 'Categorize these support tickets by type (Bug, Feature, Question, Complaint) and urgency (Critical, High, Medium, Low)',
+    steps: ['Classify ticket type', 'Assess urgency', 'Suggest action'],
+    popular: true
+  },
+  {
+    id: 'response-draft',
+    category: 'Support',
+    icon: '💬',
+    name: 'Draft Responses',
+    description: 'Generate customer response drafts',
+    command: 'Draft a helpful and empathetic response to each customer issue. Keep it professional but friendly.',
+    steps: ['Understand issue', 'Draft response', 'Add next steps']
+  },
+  {
+    id: 'feedback-analyze',
+    category: 'Support',
+    icon: '📊',
+    name: 'Analyze Feedback',
+    description: 'Extract insights from customer feedback',
+    command: 'Analyze customer feedback: identify sentiment (positive/negative/neutral), extract key themes, and note specific suggestions',
+    steps: ['Detect sentiment', 'Extract themes', 'Find suggestions']
+  },
+  
+  // Content
+  {
+    id: 'seo-meta',
+    category: 'Content',
+    icon: '🔎',
+    name: 'SEO Meta Tags',
+    description: 'Generate SEO titles and descriptions',
+    command: 'Generate SEO-optimized meta title (max 60 chars) and meta description (max 155 chars) for each page',
+    steps: ['Analyze content', 'Generate title', 'Write description'],
+    popular: true
+  },
+  {
+    id: 'product-desc',
+    category: 'Content',
+    icon: '📝',
+    name: 'Product Descriptions',
+    description: 'Write compelling product copy',
+    command: 'Write a compelling product description (2-3 sentences) that highlights key features and benefits',
+    steps: ['Identify features', 'Highlight benefits', 'Write copy']
+  },
+  {
+    id: 'translate-content',
+    category: 'Content',
+    icon: '🌐',
+    name: 'Translate Content',
+    description: 'Translate to multiple languages',
+    command: 'Translate this content to Spanish and French, keeping the tone casual and engaging',
+    steps: ['Translate to Spanish', 'Translate to French']
+  },
+  
+  // Data Cleanup
+  {
+    id: 'clean-emails',
+    category: 'Data',
+    icon: '📧',
+    name: 'Clean Email List',
+    description: 'Validate and clean email addresses',
+    command: 'Validate these email addresses: mark as Valid, Invalid (typo detected), or Suspicious. Fix common typos like gmial.com → gmail.com',
+    steps: ['Validate format', 'Detect typos', 'Suggest fixes']
+  },
+  {
+    id: 'standardize-names',
+    category: 'Data',
+    icon: '👤',
+    name: 'Standardize Names',
+    description: 'Clean and format names properly',
+    command: 'Standardize these names: proper case, remove extra spaces, split into First Name and Last Name columns',
+    steps: ['Clean formatting', 'Proper case', 'Split names']
+  },
+  {
+    id: 'extract-entities',
+    category: 'Data',
+    icon: '🏢',
+    name: 'Extract Entities',
+    description: 'Extract companies, names, emails from text',
+    command: 'Extract all company names, person names, and email addresses from this text',
+    steps: ['Find companies', 'Find people', 'Find emails']
+  }
+];
+
+// ============================================
+// TEMPLATE PANEL
+// ============================================
+
+let templatesPanelOpen = false;
+
+/**
+ * Toggle templates panel
+ */
+function toggleTemplatesPanel() {
+  templatesPanelOpen = !templatesPanelOpen;
+  
+  if (templatesPanelOpen) {
+    renderTemplatesPanel();
+  } else {
+    closeTemplatesPanel();
+  }
+  
+  if (typeof logActionEvent === 'function') {
+    logActionEvent('templates_toggle', templatesPanelOpen ? 'open' : 'close');
+  }
+}
+
+/**
+ * Render templates panel
+ */
+function renderTemplatesPanel() {
+  // Group by category
+  const categories = {};
+  AGENT_TEMPLATES.forEach(t => {
+    if (!categories[t.category]) categories[t.category] = [];
+    categories[t.category].push(t);
+  });
+  
+  // Build popular templates
+  const popular = AGENT_TEMPLATES.filter(t => t.popular);
+  const popularHtml = popular.map(t => renderTemplateCard(t, true)).join('');
+  
+  // Build category sections
+  const categoriesHtml = Object.entries(categories).map(([cat, templates]) => `
+    <div class="mb-4">
+      <div class="text-[11px] uppercase tracking-wide text-gray-500 mb-2">${cat}</div>
+      <div class="grid grid-cols-1 gap-2">
+        ${templates.map(t => renderTemplateCard(t)).join('')}
+      </div>
+    </div>
+  `).join('');
+  
+  const html = `
+    <div class="templates-panel fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" 
+         onclick="closeTemplatesPanel()" data-type="templates-overlay">
+      <div class="bg-white rounded-2xl shadow-2xl w-[95%] max-w-lg max-h-[85vh] overflow-hidden flex flex-col"
+           onclick="event.stopPropagation()">
+        
+        <!-- Header -->
+        <div class="bg-gradient-to-r from-indigo-500 to-purple-600 text-white p-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="text-xl">📋</span>
+              <span class="font-semibold">Workflow Templates</span>
+            </div>
+            <button onclick="closeTemplatesPanel()" class="text-white/80 hover:text-white text-lg">✕</button>
+          </div>
+          <p class="text-[11px] text-white/80 mt-1">
+            Pre-built workflows for common tasks. Click to apply.
+          </p>
+        </div>
+        
+        <!-- Content -->
+        <div class="flex-1 overflow-y-auto p-4">
+          
+          <!-- Popular -->
+          <div class="mb-4">
+            <div class="text-[11px] uppercase tracking-wide text-amber-600 mb-2 flex items-center gap-1">
+              ⭐ Popular Templates
+            </div>
+            <div class="grid grid-cols-1 gap-2">
+              ${popularHtml}
+            </div>
+          </div>
+          
+          <!-- All Categories -->
+          ${categoriesHtml}
+          
+        </div>
+        
+        <!-- Footer -->
+        <div class="border-t border-gray-100 p-3 bg-gray-50 text-center">
+          <span class="text-[11px] text-gray-500">
+            💡 Templates are starting points — customize as needed
+          </span>
+        </div>
+        
+      </div>
+    </div>
+  `;
+  
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+/**
+ * Render a single template card
+ */
+function renderTemplateCard(template, isPopular = false) {
+  const stepsHtml = template.steps ? template.steps.slice(0, 3).map((s, i) => 
+    `<span class="text-[11px] text-gray-400">${i + 1}. ${s}</span>`
+  ).join(' → ') : '';
+  
+  return `
+    <div class="template-card bg-gray-50 hover:bg-indigo-50 border border-gray-100 hover:border-indigo-200 rounded-xl p-3 cursor-pointer transition-all"
+         onclick="applyTemplate('${template.id}')">
+      <div class="flex items-start gap-2">
+        <span class="text-lg">${template.icon}</span>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2">
+            <span class="text-[12px] font-semibold text-gray-800">${template.name}</span>
+            ${isPopular ? '<span class="text-[8px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">Popular</span>' : ''}
+          </div>
+          <div class="text-[11px] text-gray-500 mt-0.5">${template.description}</div>
+          ${stepsHtml ? `<div class="mt-1.5 flex flex-wrap gap-1">${stepsHtml}</div>` : ''}
+        </div>
+        <span class="text-indigo-500 text-[11px] font-medium">Use →</span>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Close templates panel
+ */
+function closeTemplatesPanel() {
+  templatesPanelOpen = false;
+  const overlay = document.querySelector('[data-type="templates-overlay"]');
+  if (overlay) overlay.remove();
+}
+
+/**
+ * Apply a template
+ */
+function applyTemplate(templateId) {
+  const template = AGENT_TEMPLATES.find(t => t.id === templateId);
+  if (!template) return;
+  
+  closeTemplatesPanel();
+  
+  // Track event
+  if (typeof logActionEvent === 'function') {
+    logActionEvent('template_apply', templateId);
+  }
+  
+  // Set command in input
+  const input = document.getElementById('agentInput');
+  if (input) {
+    input.value = template.command;
+    input.focus();
+  }
+  
+  showToast(`Template loaded: ${template.name}`, 'success');
+}
+
+// ============================================
+// MODULE LOADED
+// ============================================
+
+console.log('📦 Agent Templates module loaded');
+</script>
+
+<style>
+.templates-panel {
+  animation: fadeIn 0.2s ease-out;
+}
+
+.template-card:hover {
+  transform: translateY(-1px);
+}
+</style>

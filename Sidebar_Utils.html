@@ -1,0 +1,623 @@
+<!--
+  @file Sidebar_Utils.html
+  @version 2.2.0
+  @updated 2026-01-10
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 2.2.0 (2026-01-10): Extracted from monolithic Sidebar.html
+  - 2.0.0 (2026-01-09): Initial utilities implementation
+  
+  ============================================
+  SIDEBAR_UTILS.html - Utilities Module
+  ============================================
+  
+  Shared utilities and helper functions:
+  - Toast notifications
+  - Menu toggle
+  - Tab management
+  - Initialization
+  - API key checking
+  - Home page rendering
+  
+  Included by: Sidebar.html
+  Usage: include('Sidebar_Utils')
+  
+  Note: This module should be included FIRST
+  as other modules depend on these functions.
+-->
+
+<script>
+// ============================================
+// INITIALIZATION
+// ============================================
+
+/**
+ * Initialize sidebar on page load
+ * Called from body onload
+ * Default tab: Agent (the main feature)
+ */
+function initializeSidebar() {
+  showAgent(); // Agent is the default - the main feature
+  checkApiKeys();
+  loadSubscriptionStatus(); // Load subscription info in header
+  refreshIcons(); // Render Lucide icons in static header elements
+}
+
+// ============================================
+// LUCIDE ICONS
+// ============================================
+
+/**
+ * Refresh Lucide icons in the DOM.
+ * Must be called after any dynamic HTML render that includes
+ * <i data-lucide="icon-name"></i> elements.
+ * 
+ * Uses the Lucide vanilla JS library loaded via CDN.
+ * Safe to call multiple times — it only processes un-rendered icons.
+ */
+function refreshIcons() {
+  if (typeof lucide !== 'undefined' && lucide.createIcons) {
+    lucide.createIcons();
+  }
+}
+
+/**
+ * Check if API keys are configured
+ * Shows warning alert if keys are missing
+ */
+function checkApiKeys() {
+  google.script.run.withSuccessHandler(function(settings) {
+    const models = ['CHATGPT', 'CLAUDE', 'GROQ', 'GEMINI'];
+    const missingKeys = models.filter(model => !settings[model] || !settings[model].apiKey);
+    
+    if (missingKeys.length > 0) {
+      const alertDiv = document.createElement('div');
+      alertDiv.className = 'alert alert-warning animate-in';
+      alertDiv.innerHTML = `
+        <p class="alert-title">⚠️ API Keys Missing</p>
+        <p class="alert-description">Set up: ${missingKeys.join(', ')}. <a href="#" onclick="showSettings()" class="underline font-medium">Configure now</a></p>
+      `;
+      document.getElementById('content').prepend(alertDiv);
+    }
+  }).withFailureHandler(function(err) {
+    console.error('Failed to check API keys:', err);
+  }).getUserSettings();
+}
+
+// ============================================
+// MENU MANAGEMENT
+// ============================================
+
+/**
+ * Toggle sidebar width between wide (450px) and narrow (300px)
+ * Calls backend to persist preference and refresh sidebar
+ */
+function toggleSidebarWidth() {
+  const btn = document.getElementById('widthToggleBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i data-lucide="loader" class="icon-sm icon-spin"></i>';
+    refreshIcons();
+  }
+  
+  google.script.run
+    .withSuccessHandler(function(isWide) {
+      showToast(isWide ? 'Wide mode enabled' : 'Narrow mode enabled', 'success');
+      // Sidebar will refresh automatically via showSidebar() in backend
+    })
+    .withFailureHandler(function(err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = '<i data-lucide="maximize-2" class="icon-sm"></i>';
+        refreshIcons();
+      }
+      showToast('Failed to toggle width', 'error');
+    })
+    .toggleSidebarWidth();
+}
+
+/**
+ * Toggle the slide-out menu panel
+ */
+function toggleMenu() {
+  const panel = document.getElementById('menuPanel');
+  const overlay = document.getElementById('menuOverlay');
+  const isOpen = !panel.classList.contains('translate-x-full');
+  
+  if (isOpen) {
+    panel.classList.add('translate-x-full');
+    overlay.classList.add('hidden');
+  } else {
+    panel.classList.remove('translate-x-full');
+    overlay.classList.remove('hidden');
+  }
+}
+
+// ============================================
+// TAB MANAGEMENT
+// ============================================
+
+/**
+ * Set the active tab in the tab bar
+ * @param {string|null} tabId - Tab element ID to activate, or null to deactivate all
+ */
+function setActiveTab(tabId) {
+  document.querySelectorAll('.tabs-trigger').forEach(t => t.classList.remove('active'));
+  if (tabId) {
+    document.getElementById(tabId)?.classList.add('active');
+  }
+}
+
+// ============================================
+// TOAST NOTIFICATIONS
+// ============================================
+
+/**
+ * Show a toast notification
+ * @param {string} message - Message to display
+ * @param {string} type - 'default', 'success', or 'error'
+ */
+function showToast(message, type = 'default') {
+  // Remove existing toast
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+
+  // Create toast element
+  const toast = document.createElement('div');
+  const colors = {
+    default: 'bg-gray-900 text-white',
+    success: 'bg-emerald-600 text-white',
+    error: 'bg-red-600 text-white'
+  };
+  
+  toast.className = `toast ${colors[type] || colors.default}`;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  
+  // Auto-dismiss after 3 seconds
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    setTimeout(() => toast.remove(), 200);
+  }, 3000);
+}
+
+// ============================================
+// HOME PAGE
+// ============================================
+
+/**
+ * Render the home page with available models
+ */
+function showHome() {
+  setActiveTab('tab-home');
+  const content = document.getElementById('content');
+  content.innerHTML = `
+    <div class="space-y-3 animate-in">
+      <!-- Header -->
+      <div class="card bg-gradient-to-br from-blue-50 to-indigo-50 border-blue-200">
+        <div class="card-header">
+          <h3 class="card-title">⚡ AI Formulas</h3>
+          <p class="card-description">Use any AI model directly in your cells</p>
+        </div>
+      </div>
+
+      <!-- How to Use -->
+      <div class="card p-3">
+        <h4 class="text-xs font-semibold text-gray-700 mb-2">How It Works</h4>
+        <div class="space-y-2 text-[11px] text-gray-600">
+          <div class="flex gap-2">
+            <span class="text-blue-500 font-bold">1.</span>
+            <span>Type a formula in any cell: <code class="bg-gray-100 px-1 rounded">=ChatGPT("your prompt")</code></span>
+          </div>
+          <div class="flex gap-2">
+            <span class="text-blue-500 font-bold">2.</span>
+            <span>Reference other cells: <code class="bg-gray-100 px-1 rounded">=Claude("Translate: "&A2)</code></span>
+          </div>
+          <div class="flex gap-2">
+            <span class="text-blue-500 font-bold">3.</span>
+            <span>Drag down to apply to multiple rows</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Models -->
+      <div class="space-y-2">
+        <h4 class="text-xs font-medium text-gray-500 px-1">Available Models</h4>
+        
+        <!-- ChatGPT -->
+        <div class="card p-3">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2">
+              <div class="h-8 w-8 rounded-lg bg-emerald-100 flex items-center justify-center text-sm">🧠</div>
+              <div>
+                <div class="font-medium text-sm">ChatGPT</div>
+                <div class="text-[11px] text-gray-500">gpt-5-mini</div>
+              </div>
+            </div>
+            <span class="badge badge-secondary">$0.25/MTok</span>
+          </div>
+          <div class="p-2 bg-gray-50 rounded-md">
+            <code>=ChatGPT("Your prompt here")</code>
+          </div>
+        </div>
+
+        <!-- Claude -->
+        <div class="card p-3">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2">
+              <div class="h-8 w-8 rounded-lg bg-orange-100 flex items-center justify-center text-sm">🤖</div>
+              <div>
+                <div class="font-medium text-sm">Claude</div>
+                <div class="text-[11px] text-gray-500">claude-haiku-4-5</div>
+              </div>
+            </div>
+            <span class="badge badge-secondary">$1.00/MTok</span>
+          </div>
+          <div class="p-2 bg-gray-50 rounded-md">
+            <code>=Claude("Your prompt here")</code>
+          </div>
+        </div>
+
+        <!-- Groq -->
+        <div class="card p-3">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2">
+              <div class="h-8 w-8 rounded-lg bg-yellow-100 flex items-center justify-center text-sm">⚡</div>
+              <div>
+                <div class="font-medium text-sm">Groq</div>
+                <div class="text-[11px] text-gray-500">Llama 4 Scout</div>
+              </div>
+            </div>
+            <span class="badge badge-success">$0.11/MTok</span>
+          </div>
+          <div class="p-2 bg-gray-50 rounded-md">
+            <code>=Groq("Your prompt here")</code>
+          </div>
+        </div>
+
+        <!-- Gemini -->
+        <div class="card p-3">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2">
+              <div class="h-8 w-8 rounded-lg bg-blue-100 flex items-center justify-center text-sm">🌐</div>
+              <div>
+                <div class="font-medium text-sm">Gemini</div>
+                <div class="text-[11px] text-gray-500">gemini-2.5-flash</div>
+              </div>
+            </div>
+            <span class="badge badge-success">$0.075/MTok</span>
+          </div>
+          <div class="p-2 bg-gray-50 rounded-md">
+            <code>=Gemini("Your prompt here")</code>
+          </div>
+        </div>
+
+        <!-- Image Generation Section -->
+        <h4 class="text-xs font-medium text-gray-500 px-1 mt-3">Image Generation</h4>
+        
+        <!-- DALL-E 3 -->
+        <div class="card p-3">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2">
+              <div class="h-8 w-8 rounded-lg bg-pink-100 flex items-center justify-center text-sm">🎨</div>
+              <div>
+                <div class="font-medium text-sm">DALL-E 3</div>
+                <div class="text-[11px] text-gray-500">OpenAI • HD images</div>
+              </div>
+            </div>
+            <span class="badge badge-secondary">$0.04/img</span>
+          </div>
+          <div class="p-2 bg-gray-50 rounded-md">
+            <code>=DALLE("A sunset over mountains")</code>
+          </div>
+        </div>
+
+        <!-- Gemini Imagen 3 -->
+        <div class="card p-3">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2">
+              <div class="h-8 w-8 rounded-lg bg-purple-100 flex items-center justify-center text-sm">🖼️</div>
+              <div>
+                <div class="font-medium text-sm">Imagen 3</div>
+                <div class="text-[11px] text-gray-500">Google • Photorealistic</div>
+              </div>
+            </div>
+            <span class="badge badge-success">$0.02/img</span>
+          </div>
+          <div class="p-2 bg-gray-50 rounded-md">
+            <code>=GeminiImage("A cat wearing a hat")</code>
+          </div>
+        </div>
+      </div>
+
+      <!-- Using Models -->
+      <div class="card p-3">
+        <h4 class="font-medium text-xs mb-2">🔧 Specify Models</h4>
+        <div class="space-y-2 text-xs">
+          <div class="p-2 bg-gray-50 rounded-md">
+            <code>=ChatGPT("prompt", , "gpt-5-mini")</code>
+          </div>
+          <div class="p-2 bg-gray-50 rounded-md">
+            <code>=Claude("prompt", , "claude-haiku-4-5")</code>
+          </div>
+          <div class="p-2 bg-gray-50 rounded-md">
+            <code>=Groq("prompt", , "meta-llama/llama-4-scout-17b-16e-instruct")</code>
+          </div>
+          <div class="p-2 bg-gray-50 rounded-md">
+            <code>=Gemini("prompt", , "gemini-2.5-flash")</code>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================
+// SUBSCRIPTION STATUS & MANAGEMENT
+// ============================================
+
+/**
+ * Load subscription status and update the header bar
+ */
+function loadSubscriptionStatus() {
+  google.script.run
+    .withSuccessHandler(function(sub) {
+      renderSubscriptionBar(sub);
+    })
+    .withFailureHandler(function(err) {
+      console.error('Failed to load subscription:', err);
+      // Show default on error (300 free requests)
+      renderSubscriptionBar({ tier: 'free', remaining: 300, limit: 300, isUnlimited: false });
+    })
+    .getUserSubscription();
+}
+
+/**
+ * Render subscription info in the header status bar
+ * 
+ * UX PHILOSOPHY:
+ * - Unlimited tiers (Pro, OG/Legacy): Show clean tier badge only.
+ *   Credit balances are an internal implementation detail — surfacing dollar
+ *   amounts contradicts the "Unlimited" label and creates confusion.
+ *   The system automatically uses user keys first and falls back to
+ *   managed credits transparently — no user action needed.
+ * - Free tier: Show remaining queries as a simple progress bar.
+ *   This is the one tier where usage visibility drives behavior (upgrade).
+ */
+function renderSubscriptionBar(sub) {
+  const container = document.getElementById('subscriptionStatus');
+  if (!container) return;
+  
+  if (sub.tier === 'pro') {
+    container.innerHTML = `
+      <div class="flex items-center gap-2">
+        <div class="flex items-center gap-1.5 px-2.5 py-1 bg-gradient-to-r from-blue-500 to-blue-600 rounded-full shadow-sm">
+          <i data-lucide="sparkles" style="width:11px;height:11px;color:white;stroke-width:2.5;"></i>
+          <span class="text-white text-[11px] font-medium">Pro</span>
+        </div>
+        <span class="text-[11px] text-gray-500">Unlimited</span>
+      </div>
+      <button onclick="manageBilling()" class="text-[11px] text-blue-600 hover:underline flex items-center gap-1">
+        <i data-lucide="settings" style="width:10px;height:10px;"></i> Manage
+      </button>
+    `;
+    refreshIcons();
+  } else if (sub.tier === 'legacy') {
+    container.innerHTML = `
+      <div class="flex items-center gap-2">
+        <div class="flex items-center gap-1 px-2.5 py-1 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full shadow-sm">
+          <i data-lucide="heart" style="width:11px;height:11px;color:white;stroke-width:2.5;fill:white;"></i>
+          <span class="text-white text-[11px] font-medium">OG</span>
+        </div>
+        <span class="text-[11px] text-gray-600 font-medium">Unlimited</span>
+      </div>
+      <span class="text-[11px] text-purple-400 font-medium flex items-center gap-1">
+        Early Adopter <i data-lucide="sparkles" style="width:10px;height:10px;color:#8b5cf6;"></i>
+      </span>
+    `;
+    refreshIcons();
+  } else {
+    // Free tier — show usage progress (the only tier where this matters)
+    const used = sub.limit - sub.remaining;
+    const percentage = Math.min(100, (used / sub.limit) * 100);
+    const barColor = percentage > 90 ? 'bg-red-500' : percentage > 75 ? 'bg-yellow-500' : 'bg-blue-500';
+    
+    // Show approximate free queries from managed credits if available
+    const mc = sub.managedCredits || {};
+    const approxQueriesLeft = mc.cap_usd > 0 ? Math.floor(mc.remaining_usd / 0.0003) : 0;
+    const freeQueryHint = approxQueriesLeft > 0 
+      ? `<span class="text-[11px] text-green-600 font-medium">+ ${approxQueriesLeft} free AI queries</span>` 
+      : '';
+    
+    container.innerHTML = `
+      <div class="flex-1 mr-2">
+        <div class="flex items-center justify-between mb-0.5">
+          <span class="text-[11px] font-medium text-gray-600">Free Plan</span>
+          <span class="text-[11px] text-gray-500">${sub.remaining} of ${sub.limit} left</span>
+        </div>
+        <div class="h-1 bg-gray-200 rounded-full overflow-hidden">
+          <div class="h-full ${barColor} transition-all rounded-full" style="width: ${percentage}%"></div>
+        </div>
+        ${freeQueryHint ? `<div class="mt-0.5">${freeQueryHint}</div>` : ''}
+      </div>
+      <button onclick="showSubscription()" class="text-[11px] px-2.5 py-1 bg-blue-600 text-white rounded-full hover:bg-blue-700 transition-colors font-medium whitespace-nowrap flex items-center gap-1">
+        <i data-lucide="zap" style="width:10px;height:10px;color:white;stroke-width:2.5;"></i> Upgrade
+      </button>
+    `;
+    refreshIcons();
+  }
+}
+
+/**
+ * Open billing portal for existing subscribers
+ */
+function manageBilling() {
+  showToast('Opening billing portal...', 'default');
+  
+  google.script.run
+    .withSuccessHandler(function(url) {
+      if (url) {
+        window.open(url, '_blank');
+      } else {
+        showToast('Failed to open billing portal', 'error');
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast('Error: ' + (err.message || 'Failed'), 'error');
+    })
+    .getBillingPortalUrl();
+}
+
+/**
+ * Show the subscription/upgrade page
+ */
+function showSubscription() {
+  setActiveTab(null); // No tab selected
+  const content = document.getElementById('content');
+  
+  content.innerHTML = `
+    <div class="space-y-4 animate-in p-2">
+      <!-- Header -->
+      <div class="text-center py-4">
+        <h2 class="text-lg font-bold text-gray-900">Upgrade to Pro</h2>
+        <p class="text-sm text-gray-500 mt-1">Unlock unlimited AI power for your spreadsheets</p>
+      </div>
+      
+      <!-- Pricing Card -->
+      <div class="card p-4 border-2 border-blue-500 relative">
+        <div class="absolute -top-3 left-1/2 -translate-x-1/2 bg-gradient-to-r from-orange-500 to-red-500 text-white px-3 py-0.5 rounded-full text-xs font-medium">
+          🔥 50% OFF Launch Special
+        </div>
+        
+        <div class="text-center mt-2 mb-4">
+          <div class="flex items-center justify-center gap-2">
+            <span class="text-lg text-gray-500 line-through">$29.99</span>
+            <span class="text-3xl font-bold text-blue-600">$14.99</span>
+            <span class="text-sm font-normal text-gray-500">/month</span>
+          </div>
+          <div class="text-xs text-green-600 font-medium mt-1">Save $15/month forever</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">Billed monthly • Cancel anytime</div>
+        </div>
+        
+        <!-- Features with 8px spacing -->
+        <ul class="space-y-3 mb-6">
+          <li class="flex items-start gap-3 text-sm">
+            <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+            </svg>
+            <div>
+              <span class="font-medium">Unlimited AI Requests</span>
+              <p class="text-xs text-gray-500">No monthly caps, process thousands of rows</p>
+            </div>
+          </li>
+          <li class="flex items-start gap-3 text-sm">
+            <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+            </svg>
+            <div>
+              <span class="font-medium">AI Agent Bulk Processing</span>
+              <p class="text-xs text-gray-500">Automate multi-column tasks at scale</p>
+            </div>
+          </li>
+          <li class="flex items-start gap-3 text-sm">
+            <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+            </svg>
+            <div>
+              <span class="font-medium">All AI Models</span>
+              <p class="text-xs text-gray-500">ChatGPT, Claude, Gemini, Groq & more</p>
+            </div>
+          </li>
+          <li class="flex items-start gap-3 text-sm">
+            <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+            </svg>
+            <div>
+              <span class="font-medium">Priority Support</span>
+              <p class="text-xs text-gray-500">Get help when you need it</p>
+            </div>
+          </li>
+        </ul>
+        
+        <!-- CTA Button - 40px height -->
+        <button 
+          id="upgradeMainBtn"
+          onclick="handleMainUpgrade()" 
+          class="w-full h-10 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors shadow-md">
+          Subscribe Now
+        </button>
+        
+        <p class="text-center text-xs text-gray-500 mt-3">
+          🔒 Secure payment via Stripe
+        </p>
+      </div>
+      
+      <!-- Free Tier Comparison -->
+      <div class="card p-4 bg-gray-50">
+        <h4 class="font-medium text-sm mb-3">Free Tier</h4>
+        <ul class="space-y-2 text-xs text-gray-600">
+          <li class="flex items-center gap-2">
+            <span class="text-gray-500">•</span>
+            <span>300 requests per month</span>
+          </li>
+          <li class="flex items-center gap-2">
+            <span class="text-gray-500">•</span>
+            <span>Basic AI models</span>
+          </li>
+          <li class="flex items-center gap-2">
+            <span class="text-gray-500">•</span>
+            <span>Standard processing</span>
+          </li>
+        </ul>
+      </div>
+      
+      <!-- Back Button -->
+      <button onclick="showAgent()" class="w-full text-sm text-gray-500 hover:text-gray-700 py-2">
+        ← Back to Agent
+      </button>
+    </div>
+  `;
+}
+
+/**
+ * Handle upgrade button click on subscription page
+ */
+function handleMainUpgrade() {
+  const btn = document.getElementById('upgradeMainBtn');
+  if (btn) {
+    btn.textContent = 'Opening checkout...';
+    btn.disabled = true;
+  }
+  
+  google.script.run
+    .withSuccessHandler(function(url) {
+      if (url) {
+        window.open(url, '_blank');
+        showToast('Checkout opened in new tab', 'success');
+      } else {
+        showToast('Failed to create checkout', 'error');
+      }
+      
+      if (btn) {
+        btn.textContent = 'Subscribe Now';
+        btn.disabled = false;
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast('Error: ' + (err.message || 'Failed'), 'error');
+      if (btn) {
+        btn.textContent = 'Subscribe Now';
+        btn.disabled = false;
+      }
+    })
+    .createCheckoutSession();
+}
+
+/**
+ * Show notification (more versatile than toast)
+ */
+function showNotification(message, type = 'default') {
+  showToast(message, type === 'warning' ? 'default' : type);
+}
+</script>

@@ -1,0 +1,415 @@
+<!--
+  @file Sidebar_Agent_SheetPicker.html
+  @version 1.0.0
+  @updated 2026-01-21
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-21): Initial implementation
+    - Sheet list display
+    - Sheet selection for input/output
+    - Sheet preview with headers
+  
+  ============================================
+  SIDEBAR_AGENT_SHEETPICKER - Sheet Selection Module
+  ============================================
+  
+  Allows users to select different sheets for:
+  - Reading input data
+  - Writing output results
+  - Cross-sheet operations
+  
+  Included by: Sidebar.html
+-->
+
+<script>
+// ============================================
+// SHEET PICKER STATE
+// ============================================
+
+let availableSheets = [];
+let selectedInputSheet = null;
+let selectedOutputSheet = null;
+
+// ============================================
+// SHEET DATA FUNCTIONS
+// ============================================
+
+/**
+ * Fetch list of all sheets in the spreadsheet
+ * @return {Promise<Array>} Array of sheet info
+ */
+function fetchAvailableSheets() {
+  return new Promise(function(resolve, reject) {
+    google.script.run
+      .withSuccessHandler(function(sheets) {
+        availableSheets = sheets || [];
+        resolve(availableSheets);
+      })
+      .withFailureHandler(function(err) {
+        console.error('Failed to fetch sheets:', err);
+        reject(err);
+      })
+      .getAllSheets();
+  });
+}
+
+/**
+ * Get data preview from a specific sheet
+ * @param {string} sheetName - Name of the sheet
+ * @param {string} range - Optional range
+ * @return {Promise<Object>} Sheet data
+ */
+function getSheetPreview(sheetName, range) {
+  return new Promise(function(resolve, reject) {
+    google.script.run
+      .withSuccessHandler(resolve)
+      .withFailureHandler(reject)
+      .getSheetData(sheetName, range);
+  });
+}
+
+// ============================================
+// SHEET PICKER UI
+// ============================================
+
+/**
+ * Show sheet picker modal
+ * @param {Object} options - Picker options
+ * @param {string} options.mode - 'input', 'output', or 'both'
+ * @param {string} options.title - Modal title
+ * @param {Function} options.onSelect - Callback when sheet selected
+ */
+function showSheetPicker(options) {
+  options = options || {};
+  const mode = options.mode || 'input';
+  const title = options.title || 'Select Sheet';
+  
+  // Remove existing picker
+  const existing = document.getElementById('sheetPickerModal');
+  if (existing) existing.remove();
+  
+  // Fetch sheets first
+  fetchAvailableSheets().then(function(sheets) {
+    renderSheetPickerModal(sheets, mode, title, options.onSelect);
+  }).catch(function(err) {
+    showToast('Failed to load sheets: ' + err.message, 'error');
+  });
+}
+
+/**
+ * Render the sheet picker modal
+ */
+function renderSheetPickerModal(sheets, mode, title, onSelect) {
+  const sheetsHtml = sheets.map(function(sheet) {
+    const isActive = sheet.isActive;
+    const isEmpty = sheet.isEmpty;
+    const headerPreview = sheet.headers.slice(0, 3).join(', ');
+    const headerText = headerPreview 
+      ? headerPreview + (sheet.headers.length > 3 ? '...' : '')
+      : 'Empty sheet';
+    
+    return `
+      <div class="sheet-option ${isActive ? 'sheet-active' : ''} ${isEmpty ? 'sheet-empty' : ''}"
+           onclick="selectSheetOption('${escapeHtml(sheet.name)}', '${mode}')"
+           data-sheet="${escapeHtml(sheet.name)}">
+        <div class="sheet-option-header">
+          <span class="sheet-icon">${isEmpty ? '📄' : '📊'}</span>
+          <span class="sheet-name">${escapeHtml(sheet.name)}</span>
+          ${isActive ? '<span class="sheet-badge">current</span>' : ''}
+        </div>
+        <div class="sheet-option-meta">
+          <span class="text-gray-400">${sheet.rowCount} rows, ${sheet.colCount} cols</span>
+        </div>
+        <div class="sheet-option-preview">
+          ${escapeHtml(headerText)}
+        </div>
+      </div>
+    `;
+  }).join('');
+  
+  const modalHtml = `
+    <div id="sheetPickerModal" class="sheet-picker-overlay">
+      <div class="sheet-picker-modal animate-in">
+        <div class="sheet-picker-header">
+          <h3 class="sheet-picker-title">${escapeHtml(title)}</h3>
+          <button onclick="closeSheetPicker()" class="sheet-picker-close">&times;</button>
+        </div>
+        <div class="sheet-picker-body">
+          ${sheetsHtml}
+        </div>
+        <div class="sheet-picker-footer">
+          <button onclick="closeSheetPicker()" class="validation-btn validation-btn-secondary">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+  
+  // Store callback
+  window._sheetPickerCallback = onSelect;
+}
+
+/**
+ * Handle sheet selection
+ */
+function selectSheetOption(sheetName, mode) {
+  if (mode === 'input') {
+    selectedInputSheet = sheetName;
+  } else if (mode === 'output') {
+    selectedOutputSheet = sheetName;
+  }
+  
+  if (window._sheetPickerCallback) {
+    window._sheetPickerCallback(sheetName, mode);
+  }
+  
+  closeSheetPicker();
+  showToast('Selected sheet: ' + sheetName, 'success');
+}
+
+/**
+ * Close sheet picker modal
+ */
+function closeSheetPicker() {
+  const modal = document.getElementById('sheetPickerModal');
+  if (modal) modal.remove();
+  window._sheetPickerCallback = null;
+}
+
+// ============================================
+// INLINE SHEET SELECTOR
+// ============================================
+
+/**
+ * Render inline sheet selector dropdown
+ * @param {string} elementId - ID of container element
+ * @param {string} mode - 'input' or 'output'
+ * @param {string} currentValue - Currently selected sheet
+ */
+function renderSheetSelector(elementId, mode, currentValue) {
+  const container = document.getElementById(elementId);
+  if (!container) return;
+  
+  fetchAvailableSheets().then(function(sheets) {
+    const optionsHtml = sheets.map(function(sheet) {
+      const selected = sheet.name === currentValue || (sheet.isActive && !currentValue);
+      return `<option value="${escapeHtml(sheet.name)}" ${selected ? 'selected' : ''}>
+        ${escapeHtml(sheet.name)} ${sheet.isActive ? '(current)' : ''}
+      </option>`;
+    }).join('');
+    
+    container.innerHTML = `
+      <select class="sheet-selector" onchange="onSheetSelect(this.value, '${mode}')">
+        ${optionsHtml}
+      </select>
+    `;
+  });
+}
+
+/**
+ * Handle inline sheet selector change
+ */
+function onSheetSelect(sheetName, mode) {
+  if (mode === 'input') {
+    selectedInputSheet = sheetName;
+    console.log('Input sheet changed to:', sheetName);
+  } else if (mode === 'output') {
+    selectedOutputSheet = sheetName;
+    console.log('Output sheet changed to:', sheetName);
+  }
+}
+
+// ============================================
+// SHEET CONTEXT HELPERS
+// ============================================
+
+/**
+ * Get current sheet selection state
+ * @return {Object} Current selections
+ */
+function getSheetSelections() {
+  return {
+    inputSheet: selectedInputSheet,
+    outputSheet: selectedOutputSheet,
+    availableSheets: availableSheets
+  };
+}
+
+/**
+ * Reset sheet selections to defaults
+ */
+function resetSheetSelections() {
+  selectedInputSheet = null;
+  selectedOutputSheet = null;
+}
+
+/**
+ * Check if a cross-sheet operation is requested
+ * @return {boolean} True if input/output sheets are different
+ */
+function isCrossSheetOperation() {
+  return selectedInputSheet && selectedOutputSheet && 
+         selectedInputSheet !== selectedOutputSheet;
+}
+
+// ============================================
+// MODULE LOADED
+// ============================================
+
+console.log('📦 Agent SheetPicker module loaded');
+</script>
+
+<style>
+/* Sheet Picker Modal */
+.sheet-picker-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.sheet-picker-modal {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+  max-width: 340px;
+  width: 90%;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.sheet-picker-header {
+  padding: 16px;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sheet-picker-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+  margin: 0;
+}
+
+.sheet-picker-close {
+  background: none;
+  border: none;
+  font-size: 20px;
+  color: #9ca3af;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.sheet-picker-close:hover {
+  color: #374151;
+}
+
+.sheet-picker-body {
+  padding: 12px;
+  overflow-y: auto;
+  max-height: 400px;
+}
+
+.sheet-picker-footer {
+  padding: 12px 16px;
+  background: #f9fafb;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Sheet Options */
+.sheet-option {
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.sheet-option:hover {
+  border-color: #3b82f6;
+  background: #f8fafc;
+}
+
+.sheet-option.sheet-active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+
+.sheet-option.sheet-empty {
+  opacity: 0.6;
+}
+
+.sheet-option-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.sheet-icon {
+  font-size: 14px;
+}
+
+.sheet-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: #111827;
+}
+
+.sheet-badge {
+  font-size: 9px;
+  padding: 2px 6px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sheet-option-meta {
+  font-size: 10px;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+
+.sheet-option-preview {
+  font-size: 10px;
+  color: #9ca3af;
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Inline Selector */
+.sheet-selector {
+  font-size: 11px;
+  padding: 4px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: white;
+  color: #374151;
+  cursor: pointer;
+  min-width: 120px;
+}
+
+.sheet-selector:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+</style>

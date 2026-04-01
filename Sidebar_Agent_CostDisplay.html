@@ -1,0 +1,454 @@
+<!--
+  @file Sidebar_Agent_CostDisplay.html
+  @version 1.0.0
+  @updated 2026-01-21
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-21): Initial implementation
+    - Token usage display
+    - Cost calculation and display
+    - Model comparison
+  
+  ============================================
+  SIDEBAR_AGENT_COSTDISPLAY - Cost/Token Display Module
+  ============================================
+  
+  Shows users:
+  - Token usage after task completion
+  - Actual cost based on model pricing
+  - Cost breakdown (input/output)
+  
+  Included by: Sidebar.html
+-->
+
+<script>
+// ============================================
+// COST DISPLAY STATE
+// ============================================
+
+// Track accumulated costs for the session
+let sessionCosts = {
+  totalInputTokens: 0,
+  totalOutputTokens: 0,
+  totalCost: 0,
+  taskCount: 0,
+  startTime: Date.now()
+};
+
+// ============================================
+// COST CALCULATION
+// ============================================
+
+/**
+ * Calculate cost from token counts using backend pricing
+ * @param {string} model - Model identifier
+ * @param {number} inputTokens - Input token count
+ * @param {number} outputTokens - Output token count
+ * @return {Promise<Object>} Cost breakdown
+ */
+function calculateCost(model, inputTokens, outputTokens) {
+  return new Promise(function(resolve, reject) {
+    google.script.run
+      .withSuccessHandler(resolve)
+      .withFailureHandler(function(err) {
+        // Fallback to client-side estimation if backend fails
+        resolve(estimateCostClientSide(model, inputTokens, outputTokens));
+      })
+      .calculateTokenCost(model, inputTokens, outputTokens);
+  });
+}
+
+/**
+ * Client-side cost estimation (fallback)
+ * Uses approximate pricing if backend is unavailable
+ */
+function estimateCostClientSide(model, inputTokens, outputTokens) {
+  // Approximate pricing per 1M tokens (fallback values)
+  const fallbackPricing = {
+    GEMINI: { input: 0.30, output: 2.50, name: 'Gemini 2.5 Flash' },
+    CHATGPT: { input: 0.25, output: 2.00, name: 'GPT-5 Mini' },
+    CLAUDE: { input: 1.00, output: 5.00, name: 'Claude Haiku 4.5' },
+    GROQ: { input: 0.11, output: 0.34, name: 'Llama 4 Scout' }
+  };
+  
+  const pricing = fallbackPricing[model] || fallbackPricing.GEMINI;
+  const inputCost = (inputTokens / 1000000) * pricing.input;
+  const outputCost = (outputTokens / 1000000) * pricing.output;
+  
+  return {
+    model: model,
+    modelName: pricing.name,
+    inputTokens: inputTokens,
+    outputTokens: outputTokens,
+    totalTokens: inputTokens + outputTokens,
+    inputCost: inputCost,
+    outputCost: outputCost,
+    totalCost: inputCost + outputCost,
+    totalCostFormatted: formatCostDisplay(inputCost + outputCost),
+    isEstimate: true
+  };
+}
+
+// ============================================
+// DISPLAY FUNCTIONS
+// ============================================
+
+/**
+ * Show cost summary after task completion
+ * Called from completion handlers
+ * 
+ * @param {Object} taskResult - Task result with token info
+ * @param {string} taskResult.model - Model used
+ * @param {number} taskResult.inputTokens - Input tokens used
+ * @param {number} taskResult.outputTokens - Output tokens used
+ * @param {number} taskResult.rowCount - Rows processed
+ */
+function showTaskCostSummary(taskResult) {
+  if (!taskResult) return;
+  
+  const model = taskResult.model || 'GEMINI';
+  const inputTokens = taskResult.inputTokens || taskResult.totalInputTokens || 0;
+  const outputTokens = taskResult.outputTokens || taskResult.totalOutputTokens || 0;
+  
+  if (inputTokens === 0 && outputTokens === 0) {
+    console.log('No token data available for cost display');
+    return;
+  }
+  
+  calculateCost(model, inputTokens, outputTokens).then(function(cost) {
+    // Update session totals
+    sessionCosts.totalInputTokens += inputTokens;
+    sessionCosts.totalOutputTokens += outputTokens;
+    sessionCosts.totalCost += cost.totalCost;
+    sessionCosts.taskCount++;
+    
+    // Render cost badge
+    renderCostBadge(cost, taskResult.rowCount);
+  });
+}
+
+/**
+ * Render cost badge in the UI
+ * Shows compact cost info that expands on click
+ */
+function renderCostBadge(cost, rowCount) {
+  // Find or create the cost display container
+  let container = document.getElementById('taskCostDisplay');
+  
+  if (!container) {
+    // Insert after the completion message
+    const messagesDiv = document.getElementById('agentMessages');
+    if (!messagesDiv) return;
+    
+    const completionMsg = messagesDiv.querySelector('[data-type="complete"]');
+    if (completionMsg) {
+      completionMsg.insertAdjacentHTML('beforeend', '<div id="taskCostDisplay"></div>');
+      container = document.getElementById('taskCostDisplay');
+    } else {
+      return;
+    }
+  }
+  
+  const tokensFormatted = formatTokens(cost.totalTokens);
+  const costFormatted = cost.totalCostFormatted || formatCostDisplay(cost.totalCost);
+  const isEstimate = cost.isEstimate ? ' (est.)' : '';
+  
+  const badgeHtml = `
+    <div class="cost-badge" onclick="toggleCostDetails()">
+      <span class="cost-badge-icon">💰</span>
+      <span class="cost-badge-text">${tokensFormatted} tokens · ${costFormatted}${isEstimate}</span>
+      <span class="cost-badge-expand">▾</span>
+    </div>
+    <div id="costDetails" class="cost-details hidden">
+      <div class="cost-detail-row">
+        <span class="cost-detail-label">Model</span>
+        <span class="cost-detail-value">${escapeHtml(cost.modelName || cost.model)}</span>
+      </div>
+      <div class="cost-detail-row">
+        <span class="cost-detail-label">Input tokens</span>
+        <span class="cost-detail-value">${formatTokens(cost.inputTokens)}</span>
+      </div>
+      <div class="cost-detail-row">
+        <span class="cost-detail-label">Output tokens</span>
+        <span class="cost-detail-value">${formatTokens(cost.outputTokens)}</span>
+      </div>
+      <div class="cost-detail-row cost-detail-divider">
+        <span class="cost-detail-label">Input cost</span>
+        <span class="cost-detail-value">${formatCostDisplay(cost.inputCost)}</span>
+      </div>
+      <div class="cost-detail-row">
+        <span class="cost-detail-label">Output cost</span>
+        <span class="cost-detail-value">${formatCostDisplay(cost.outputCost)}</span>
+      </div>
+      <div class="cost-detail-row cost-detail-total">
+        <span class="cost-detail-label">Total cost</span>
+        <span class="cost-detail-value">${costFormatted}</span>
+      </div>
+      ${rowCount ? `
+      <div class="cost-detail-row cost-detail-per-row">
+        <span class="cost-detail-label">Per row</span>
+        <span class="cost-detail-value">${formatCostDisplay(cost.totalCost / rowCount)}</span>
+      </div>
+      ` : ''}
+    </div>
+  `;
+  
+  container.innerHTML = badgeHtml;
+  console.log('💰 Task cost:', costFormatted, '(' + tokensFormatted + ' tokens)');
+}
+
+/**
+ * Toggle cost details visibility
+ */
+function toggleCostDetails() {
+  const details = document.getElementById('costDetails');
+  const badge = document.querySelector('.cost-badge');
+  
+  if (details) {
+    details.classList.toggle('hidden');
+    if (badge) {
+      const expand = badge.querySelector('.cost-badge-expand');
+      if (expand) {
+        expand.textContent = details.classList.contains('hidden') ? '▾' : '▴';
+      }
+    }
+  }
+}
+
+/**
+ * Render session cost summary
+ * Shows accumulated costs across multiple tasks
+ */
+function renderSessionCostSummary() {
+  if (sessionCosts.taskCount === 0) return '';
+  
+  const duration = Math.round((Date.now() - sessionCosts.startTime) / 1000 / 60);
+  
+  return `
+    <div class="session-cost-summary">
+      <div class="session-cost-header">
+        <span>Session Summary</span>
+        <span class="session-cost-duration">${duration}m</span>
+      </div>
+      <div class="session-cost-stats">
+        <div class="session-stat">
+          <span class="session-stat-value">${sessionCosts.taskCount}</span>
+          <span class="session-stat-label">tasks</span>
+        </div>
+        <div class="session-stat">
+          <span class="session-stat-value">${formatTokens(sessionCosts.totalInputTokens + sessionCosts.totalOutputTokens)}</span>
+          <span class="session-stat-label">tokens</span>
+        </div>
+        <div class="session-stat">
+          <span class="session-stat-value">${formatCostDisplay(sessionCosts.totalCost)}</span>
+          <span class="session-stat-label">total cost</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================
+// FORMATTING HELPERS
+// ============================================
+
+/**
+ * Format cost as currency
+ * @param {number} cost - Cost in USD
+ * @return {string} Formatted cost
+ */
+function formatCostDisplay(cost) {
+  if (!cost || cost === 0) return '$0.00';
+  if (cost < 0.0001) return '<$0.0001';
+  if (cost < 0.001) return '$' + cost.toFixed(4);
+  if (cost < 0.01) return '$' + cost.toFixed(3);
+  if (cost < 1) return '$' + cost.toFixed(2);
+  return '$' + cost.toFixed(2);
+}
+
+/**
+ * Format token count with K/M suffix
+ * @param {number} tokens - Token count
+ * @return {string} Formatted count
+ */
+function formatTokens(tokens) {
+  if (!tokens || tokens === 0) return '0';
+  if (tokens < 1000) return tokens.toString();
+  if (tokens < 10000) return (tokens / 1000).toFixed(1) + 'K';
+  if (tokens < 1000000) return Math.round(tokens / 1000) + 'K';
+  return (tokens / 1000000).toFixed(2) + 'M';
+}
+
+/**
+ * Reset session costs
+ */
+function resetSessionCosts() {
+  sessionCosts = {
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCost: 0,
+    taskCount: 0,
+    startTime: Date.now()
+  };
+}
+
+/**
+ * Get current session costs
+ * @return {Object} Session cost data
+ */
+function getSessionCosts() {
+  return { ...sessionCosts };
+}
+
+// ============================================
+// MODULE LOADED
+// ============================================
+
+console.log('📦 Agent CostDisplay module loaded');
+</script>
+
+<style>
+/* Cost Badge */
+.cost-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: linear-gradient(135deg, #f0fdf4, #ecfdf5);
+  border: 1px solid #bbf7d0;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #166534;
+  cursor: pointer;
+  margin-top: 8px;
+  transition: all 0.15s;
+}
+
+.cost-badge:hover {
+  background: linear-gradient(135deg, #dcfce7, #d1fae5);
+  border-color: #86efac;
+}
+
+.cost-badge-icon {
+  font-size: 12px;
+}
+
+.cost-badge-text {
+  font-weight: 500;
+}
+
+.cost-badge-expand {
+  font-size: 10px;
+  color: #22c55e;
+  margin-left: 2px;
+}
+
+/* Cost Details (Expandable) */
+.cost-details {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  font-size: 11px;
+}
+
+.cost-details.hidden {
+  display: none;
+}
+
+.cost-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+}
+
+.cost-detail-label {
+  color: #6b7280;
+}
+
+.cost-detail-value {
+  font-weight: 500;
+  color: #374151;
+  font-family: 'SF Mono', Monaco, monospace;
+}
+
+.cost-detail-divider {
+  border-top: 1px solid #e5e7eb;
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.cost-detail-total {
+  border-top: 1px solid #e5e7eb;
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.cost-detail-total .cost-detail-label,
+.cost-detail-total .cost-detail-value {
+  font-weight: 600;
+  color: #111827;
+}
+
+.cost-detail-per-row {
+  color: #9ca3af;
+  font-size: 10px;
+}
+
+.cost-detail-per-row .cost-detail-value {
+  font-weight: 400;
+  color: #9ca3af;
+}
+
+/* Session Summary */
+.session-cost-summary {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 12px;
+}
+
+.session-cost-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #64748b;
+  margin-bottom: 10px;
+}
+
+.session-cost-duration {
+  font-weight: 400;
+  color: #94a3b8;
+}
+
+.session-cost-stats {
+  display: flex;
+  gap: 16px;
+}
+
+.session-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.session-stat-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.session-stat-label {
+  font-size: 9px;
+  color: #94a3b8;
+  text-transform: uppercase;
+}
+</style>

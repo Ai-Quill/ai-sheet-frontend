@@ -1,0 +1,505 @@
+<!--
+  @file Sidebar_Agent_MultiColumnFormula.html
+  @version 1.0.0
+  @updated 2026-01-21
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-21): Extracted from Sidebar_Agent_Execution.html
+    - Multi-column formula evaluation
+    - Hybrid execution (formula + AI)
+    - Formula success UI
+  
+  ============================================
+  SIDEBAR_AGENT_MULTICOLUMNFORMULA - Multi-Column Formula Module
+  ============================================
+  
+  Handles multi-column formula-first evaluation:
+  - Evaluate each column for formula possibility
+  - Hybrid execution (some columns formula, some AI)
+  - Multi-formula success display
+  
+  Included by: Sidebar.html (after Sidebar_Agent_Formula)
+  Dependencies: renderDecisionFeedback, addAgentMessage, autoScrollMessages, showToast
+-->
+
+<script>
+// ============================================
+// MULTI-COLUMN FORMULA EVALUATION
+// ============================================
+
+/**
+ * Store plan for potential AI retry
+ */
+let lastPlanForRetry = null;
+
+/**
+ * Evaluate multi-column plan for formula-first opportunities
+ * Some columns may use formulas, others may need AI
+ */
+function evaluateMultiColumnFormulaFirst(plan) {
+  const columnPrompts = plan.columnPrompts || {};
+  const columns = Object.keys(columnPrompts);
+  
+  // Track which columns can use formulas vs need AI
+  const formulaColumns = {};
+  const aiColumns = {};
+  let evaluatedCount = 0;
+  
+  // Parse input range for row numbers
+  const rangeMatch = plan.inputRange?.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/i);
+  const startRow = rangeMatch ? parseInt(rangeMatch[2]) : 2;
+  const endRow = rangeMatch ? parseInt(rangeMatch[4]) : startRow + 10;
+  
+  console.log('🔢 [FormulaFirst] Evaluating', columns.length, 'columns...');
+  
+  // Evaluate each column
+  columns.forEach(function(col) {
+    const prompt = columnPrompts[col];
+    
+    // Detect task type from prompt
+    const taskType = detectTaskTypeFromPrompt(prompt);
+    const categories = extractCategoriesFromPrompt(prompt);
+    
+    // Only check formula for classify/categorize/extract tasks
+    if (!['classify', 'categorize', 'extract'].includes(taskType)) {
+      console.log(`🔢 [FormulaFirst] Column ${col}: AI required (${taskType})`);
+      aiColumns[col] = prompt;
+      evaluatedCount++;
+      checkAllColumnsEvaluated();
+      return;
+    }
+    
+    const formulaContext = {
+      command: prompt,
+      taskType: taskType,
+      inputColumn: plan.inputColumn,
+      outputColumn: col,
+      inputRange: plan.inputRange,
+      categories: categories
+    };
+    
+    google.script.run
+      .withSuccessHandler(function(evalResult) {
+        if (evalResult && evalResult.canUseFormula && evalResult.formula) {
+          console.log(`🔢 [FormulaFirst] Column ${col}: FORMULA - ${evalResult.formula.substring(0, 50)}...`);
+          formulaColumns[col] = {
+            formula: evalResult.formula,
+            explanation: evalResult.explanation
+          };
+        } else {
+          console.log(`🔢 [FormulaFirst] Column ${col}: AI needed - ${evalResult?.explanation || 'No pattern'}`);
+          aiColumns[col] = prompt;
+        }
+        evaluatedCount++;
+        checkAllColumnsEvaluated();
+      })
+      .withFailureHandler(function(err) {
+        console.warn(`🔢 [FormulaFirst] Column ${col}: Error - ${err.message}`);
+        aiColumns[col] = prompt;
+        evaluatedCount++;
+        checkAllColumnsEvaluated();
+      })
+      .checkFormulaFirst(formulaContext);
+  });
+  
+  function checkAllColumnsEvaluated() {
+    if (evaluatedCount < columns.length) return;
+    
+    // All columns evaluated - now execute the hybrid plan
+    const formulaCount = Object.keys(formulaColumns).length;
+    const aiCount = Object.keys(aiColumns).length;
+    
+    console.log(`🔢 [FormulaFirst] Results: ${formulaCount} formula, ${aiCount} AI`);
+    
+    if (formulaCount > 0 && aiCount === 0) {
+      // ALL columns can use formulas!
+      renderDecisionFeedback({
+        explanation: `All ${formulaCount} columns can use native Google Sheets formulas`
+      }, plan, true);
+      applyMultipleFormulasAndShowSuccess(formulaColumns, plan, startRow, endRow);
+    } else if (formulaCount > 0 && aiCount > 0) {
+      // HYBRID: Some formulas, some AI
+      renderDecisionFeedback({
+        explanation: `Smart hybrid: ${formulaCount} column(s) use formulas, ${aiCount} column(s) need AI processing.`
+      }, plan, false);
+      executeHybridPlan(formulaColumns, aiColumns, plan, startRow, endRow);
+    } else {
+      // All columns need AI
+      renderDecisionFeedback({
+        explanation: 'These tasks require understanding semantic meaning - formulas cannot process this type of content.'
+      }, plan, false);
+      executeWithAI(plan);
+    }
+  }
+}
+
+/**
+ * Detect task type from a prompt string
+ */
+function detectTaskTypeFromPrompt(prompt) {
+  const lower = (prompt || '').toLowerCase();
+  
+  if (lower.includes('classify') || lower.includes('categorize') || 
+      lower.includes('exactly one of:') || lower.includes('must be one of:')) {
+    return 'classify';
+  }
+  if (lower.includes('extract')) return 'extract';
+  if (lower.includes('summarize') || lower.includes('summarise')) return 'summarize';
+  if (lower.includes('translate')) return 'translate';
+  if (lower.includes('generate')) return 'generate';
+  
+  return 'unknown';
+}
+
+/**
+ * Extract categories from the prompt (e.g., "classify as Hot/Warm/Cold")
+ */
+function extractCategoriesFromPrompt(prompt) {
+  if (!prompt) return null;
+  const match = prompt.match(/exactly one of:\s*([^\n]+)/i) ||
+                prompt.match(/categories?:\s*([^\n]+)/i);
+  return match ? match[1].trim() : null;
+}
+
+// ============================================
+// MULTI-FORMULA APPLICATION
+// ============================================
+
+/**
+ * Apply multiple formulas for multi-column plan
+ */
+function applyMultipleFormulasAndShowSuccess(formulaColumns, plan, startRow, endRow) {
+  const columns = Object.keys(formulaColumns);
+  let appliedCount = 0;
+  let totalRows = 0;
+  
+  columns.forEach(function(col) {
+    const { formula } = formulaColumns[col];
+    
+    google.script.run
+      .withSuccessHandler(function(result) {
+        appliedCount++;
+        if (result && result.success) {
+          totalRows += result.rowsAffected || 0;
+        }
+        
+        if (appliedCount === columns.length) {
+          // All formulas applied
+          showMultiFormulaSuccess(formulaColumns, totalRows, plan);
+        }
+      })
+      .withFailureHandler(function(err) {
+        console.error(`Formula apply failed for column ${col}:`, err);
+        appliedCount++;
+        
+        if (appliedCount === columns.length) {
+          showMultiFormulaSuccess(formulaColumns, totalRows, plan);
+        }
+      })
+      .applyFormulaToColumn(formula, col, startRow, endRow);
+  });
+}
+
+/**
+ * Show success message for multiple formulas
+ */
+function showMultiFormulaSuccess(formulaColumns, totalRows, plan) {
+  setExecuting(false);
+  
+  const columns = Object.keys(formulaColumns);
+  const messagesDiv = document.getElementById('agentMessages');
+  
+  // Remove plan card and progress
+  const planCard = messagesDiv.querySelector('[data-type="plan"]');
+  const progressCard = messagesDiv.querySelector('[data-type="hybrid-progress"]');
+  if (planCard) planCard.remove();
+  if (progressCard) progressCard.remove();
+  
+  const html = `
+    <div class="card p-3 border-2 border-green-300 bg-gradient-to-br from-green-50 to-emerald-50" data-type="formula-success">
+      <div class="flex items-start gap-2 mb-2">
+        <span class="text-xl">⚡</span>
+        <div class="flex-1">
+          <p class="text-[12px] font-semibold text-green-800">All Formulas Applied!</p>
+          <p class="text-[11px] text-green-700 mt-0.5">${columns.length} columns filled with native formulas</p>
+        </div>
+      </div>
+      
+      <div class="space-y-2 mt-2">
+        ${columns.map(col => `
+          <div class="bg-white/70 rounded-lg p-2 border border-green-200">
+            <p class="text-[11px] text-gray-500 mb-1">Column ${col}:</p>
+            <code class="text-[11px] text-green-700 font-mono break-all">${escapeHtml(formulaColumns[col].formula)}</code>
+          </div>
+        `).join('')}
+      </div>
+      
+      <div class="flex items-center justify-between mt-2 pt-2 border-t border-green-200">
+        <div class="flex items-center gap-2">
+          <span class="text-[11px] px-2 py-0.5 bg-green-100 text-green-700 rounded-full font-medium">Formula ✓</span>
+          <span class="text-[11px] px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full font-medium">Auto-updates ✓</span>
+        </div>
+        <span class="text-[11px] text-gray-500">${totalRows} rows</span>
+      </div>
+    </div>
+  `;
+  
+  messagesDiv.insertAdjacentHTML('beforeend', html);
+  autoScrollMessages();
+  
+  showToast(`${columns.length} columns filled with formulas`, 'success');
+}
+
+// ============================================
+// HYBRID EXECUTION (Formula + AI)
+// ============================================
+
+/**
+ * Execute hybrid plan: formulas for some columns, AI for others
+ */
+function executeHybridPlan(formulaColumns, aiColumns, plan, startRow, endRow) {
+  const formulaCols = Object.keys(formulaColumns);
+  const aiCols = Object.keys(aiColumns);
+  
+  console.log(`🔢 [Hybrid] Applying ${formulaCols.length} formulas, ${aiCols.length} AI jobs`);
+  
+  // Show hybrid progress message
+  showHybridProgressMessage(formulaCols, aiCols, plan);
+  
+  // Apply formulas first (instant)
+  let formulasApplied = 0;
+  formulaCols.forEach(function(col) {
+    const { formula } = formulaColumns[col];
+    
+    google.script.run
+      .withSuccessHandler(function(result) {
+        formulasApplied++;
+        console.log(`🔢 [Hybrid] Formula applied to column ${col}`);
+        
+        if (formulasApplied === formulaCols.length) {
+          // All formulas done - now start AI jobs for remaining columns
+          executeAIColumnsOnly(aiColumns, plan);
+        }
+      })
+      .withFailureHandler(function(err) {
+        console.error(`🔢 [Hybrid] Formula failed for column ${col}:`, err);
+        // Add to AI columns instead
+        aiColumns[col] = plan.columnPrompts[col];
+        formulasApplied++;
+        
+        if (formulasApplied === formulaCols.length) {
+          executeAIColumnsOnly(aiColumns, plan);
+        }
+      })
+      .applyFormulaToColumn(formula, col, startRow, endRow);
+  });
+}
+
+/**
+ * Show hybrid progress message
+ */
+function showHybridProgressMessage(formulaCols, aiCols, plan) {
+  const messagesDiv = document.getElementById('agentMessages');
+  
+  // Remove plan card
+  const planCard = messagesDiv.querySelector('[data-type="plan"]');
+  if (planCard) planCard.remove();
+  
+  const html = `
+    <div class="card p-3 border-2 border-blue-300 bg-gradient-to-br from-blue-50 to-indigo-50" data-type="hybrid-progress">
+      <div class="flex items-start gap-2 mb-2">
+        <span class="text-xl">⚡🤖</span>
+        <div class="flex-1">
+          <p class="text-[12px] font-semibold text-blue-800">Smart Hybrid Processing</p>
+          <p class="text-[11px] text-blue-700 mt-0.5">Using the best approach for each column</p>
+        </div>
+      </div>
+      
+      <div class="space-y-1 mt-2">
+        ${formulaCols.map(col => `
+          <div class="flex items-center gap-2 text-[11px]">
+            <span class="text-green-500">⚡</span>
+            <span class="text-gray-700">Column ${col}</span>
+            <span class="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-[11px]">Formula</span>
+          </div>
+        `).join('')}
+        ${aiCols.map(col => `
+          <div class="flex items-center gap-2 text-[11px]">
+            <span class="text-blue-500">🤖</span>
+            <span class="text-gray-700">Column ${col}</span>
+            <span class="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[11px]">AI processing...</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+  
+  messagesDiv.insertAdjacentHTML('beforeend', html);
+  autoScrollMessages();
+}
+
+/**
+ * Execute AI processing for specific columns only
+ */
+function executeAIColumnsOnly(aiColumns, plan) {
+  // Create a modified plan with only AI columns
+  const aiOnlyPlan = { ...plan };
+  aiOnlyPlan.columnPrompts = aiColumns;
+  aiOnlyPlan.outputColumns = Object.keys(aiColumns);
+  
+  console.log('🤖 [Hybrid] Starting AI processing for columns:', Object.keys(aiColumns).join(', '));
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      const elapsed = executionStartTime ? ((Date.now() - executionStartTime) / 1000).toFixed(1) : '?';
+      console.log('⏱️ [TIMING] executeAgentPlan (AI columns) returned after ' + elapsed + 's');
+      
+      if (result.success) {
+        showMultiColumnProgress(aiOnlyPlan, result);
+        startJobPolling(result.jobs, aiOnlyPlan);
+      } else {
+        addAgentMessage('error', 'Failed to start AI processing');
+        setExecuting(false);
+      }
+    })
+    .withFailureHandler(function(err) {
+      addAgentMessage('error', 'Error: ' + err.message);
+      setExecuting(false);
+    })
+    .executeAgentPlan(aiOnlyPlan);
+}
+
+// ============================================
+// SINGLE COLUMN FORMULA SUCCESS
+// ============================================
+
+/**
+ * Apply formula and show success message
+ */
+function applyFormulaAndShowSuccess(evalResult, plan) {
+  // Parse range to get start/end rows
+  const rangeMatch = plan.inputRange?.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/i);
+  const startRow = rangeMatch ? parseInt(rangeMatch[2]) : 2;
+  const endRow = rangeMatch ? parseInt(rangeMatch[4]) : startRow + 10;
+  
+  google.script.run
+    .withSuccessHandler(function(applyResult) {
+      setExecuting(false);
+      
+      if (applyResult && applyResult.success) {
+        // Show formula success message
+        const formulaHtml = `
+          <div class="card p-3 border-2 border-green-300 bg-gradient-to-br from-green-50 to-emerald-50" data-type="formula-success">
+            <div class="flex items-start gap-2 mb-2">
+              <span class="text-xl">⚡</span>
+              <div class="flex-1">
+                <p class="text-[12px] font-semibold text-green-800">Formula Applied!</p>
+                <p class="text-[11px] text-green-700 mt-0.5">${escapeHtml(evalResult.explanation)}</p>
+              </div>
+            </div>
+            
+            <div class="bg-white/70 rounded-lg p-2 mb-2 border border-green-200">
+              <p class="text-[11px] text-gray-500 mb-1">Formula:</p>
+              <code class="text-[11px] text-green-700 font-mono break-all">${escapeHtml(applyResult.formula || evalResult.formula)}</code>
+            </div>
+            
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span class="text-[11px] px-2 py-0.5 bg-green-100 text-green-700 rounded-full font-medium">Formula ✓</span>
+                <span class="text-[11px] px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full font-medium">Auto-updates ✓</span>
+              </div>
+              <span class="text-[11px] text-gray-500">${applyResult.rowsAffected} rows</span>
+            </div>
+            
+            <div class="mt-2 pt-2 border-t border-green-200">
+              <button onclick="retryWithAI()" class="text-[11px] text-gray-500 hover:text-blue-600">
+                Not right? → Use AI instead
+              </button>
+            </div>
+          </div>
+        `;
+        
+        const messagesDiv = document.getElementById('agentMessages');
+        
+        // Remove plan card
+        const planCard = messagesDiv.querySelector('[data-type="plan"]');
+        if (planCard) planCard.remove();
+        
+        messagesDiv.insertAdjacentHTML('beforeend', formulaHtml);
+        autoScrollMessages();
+        
+        showToast('Formula applied to ' + applyResult.rowsAffected + ' rows', 'success');
+        
+        // Show "What's next?" suggestions after formula success
+        showNextActionSuggestions(plan);
+        setExecuting(false);
+      } else {
+        // Formula apply failed - fallback to AI
+        console.warn('Formula apply failed:', applyResult?.error);
+        executeWithAI(plan);
+      }
+    })
+    .withFailureHandler(function(err) {
+      console.warn('Formula apply error:', err.message);
+      executeWithAI(plan);
+    })
+    .applyFormulaToColumn(evalResult.formula, plan.outputColumns[0], startRow, endRow);
+}
+
+// ============================================
+// AI EXECUTION FALLBACK
+// ============================================
+
+/**
+ * Retry with AI if formula result isn't satisfactory
+ */
+function retryWithAI() {
+  if (lastPlanForRetry) {
+    console.log('🔄 Retrying with AI...');
+    
+    // Remove formula success card
+    const formulaCard = document.querySelector('[data-type="formula-success"]');
+    if (formulaCard) formulaCard.remove();
+    
+    // Clear the formula cells first
+    // (User can manually clear if needed)
+    
+    executeWithAI(lastPlanForRetry);
+    lastPlanForRetry = null;
+  }
+}
+
+/**
+ * Execute with AI processing (original flow)
+ */
+function executeWithAI(planToExecute) {
+  // Store for potential retry
+  lastPlanForRetry = { ...planToExecute };
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      const elapsed = executionStartTime ? ((Date.now() - executionStartTime) / 1000).toFixed(1) : '?';
+      console.log('⏱️ [TIMING] executeAgentPlan returned after ' + elapsed + 's');
+      
+      if (result.success) {
+        showMultiColumnProgress(planToExecute, result);
+        startJobPolling(result.jobs, planToExecute);
+      } else {
+        addAgentMessage('error', 'Failed to start execution');
+        setExecuting(false);
+      }
+    })
+    .withFailureHandler(function(err) {
+      addAgentMessage('error', 'Error: ' + err.message);
+      setExecuting(false);
+    })
+    .executeAgentPlan(planToExecute);
+}
+
+// ============================================
+// MODULE LOADED
+// ============================================
+
+console.log('📦 Agent MultiColumnFormula module loaded');
+</script>

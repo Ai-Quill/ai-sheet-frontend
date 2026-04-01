@@ -1,0 +1,307 @@
+<!--
+  @file Sidebar_Agent_Help.html
+  @version 1.0.0
+  @updated 2026-01-15
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-15): Initial help panel
+  
+  ============================================
+  SIDEBAR_AGENT_HELP - "What can you do?" Panel
+  ============================================
+  
+  Contains:
+  - Capabilities overview
+  - Example commands by category
+  - Quick start guide
+  - Tips & tricks
+  
+  Included by: Sidebar_Agent.html
+  Depends on: Sidebar_Agent_Core.html
+-->
+
+<script>
+// ============================================
+// HELP PANEL STATE
+// ============================================
+
+let helpPanelOpen = false;
+
+// ============================================
+// HELP CONTENT
+// ============================================
+
+const AGENT_CAPABILITIES = [
+  {
+    category: "Transform Data",
+    icon: "✨",
+    color: "bg-purple-100 text-purple-700",
+    examples: [
+      "Translate column A to Spanish",
+      "Summarize these reviews in 2 sentences",
+      "Clean and format phone numbers",
+      "Extract email addresses from text"
+    ]
+  },
+  {
+    category: "Classify & Categorize",
+    icon: "🏷️",
+    color: "bg-blue-100 text-blue-700",
+    examples: [
+      "Classify leads as Hot, Warm, or Cold",
+      "Categorize support tickets by urgency",
+      "Tag products by type",
+      "Score sentiment as positive/negative/neutral"
+    ]
+  },
+  {
+    category: "Generate Content",
+    icon: "📝",
+    color: "bg-green-100 text-green-700",
+    examples: [
+      "Write product descriptions from specs",
+      "Generate SEO meta descriptions",
+      "Create email subject lines",
+      "Draft response to customer feedback"
+    ]
+  },
+  {
+    category: "Analyze & Extract",
+    icon: "🔍",
+    color: "bg-amber-100 text-amber-700",
+    examples: [
+      "Extract company names from descriptions",
+      "Find key topics in articles",
+      "Identify action items from meeting notes",
+      "Parse addresses into components"
+    ]
+  },
+  {
+    category: "Multi-Step Tasks",
+    icon: "🔗",
+    color: "bg-indigo-100 text-indigo-700",
+    examples: [
+      "Classify leads, then summarize by category",
+      "Translate to Spanish, then proofread",
+      "Extract emails, validate, then score",
+      "Clean data, categorize, then generate report"
+    ]
+  }
+];
+
+const QUICK_TIPS = [
+  { icon: "💡", tip: "Select your data range first, then ask the agent" },
+  { icon: "🎯", tip: "Be specific: 'Classify as Hot/Warm/Cold' works better than 'Classify'" },
+  { icon: "📊", tip: "The agent auto-detects tables and headers" },
+  { icon: "⚡", tip: "Use 'then' to chain multiple tasks together" },
+  { icon: "🔄", tip: "Click ↻ to refresh if your selection changed" }
+];
+
+// ============================================
+// RENDER HELP PANEL
+// ============================================
+
+/**
+ * Toggle the help panel
+ */
+function toggleHelpPanel() {
+  helpPanelOpen = !helpPanelOpen;
+  
+  if (helpPanelOpen) {
+    renderHelpPanel();
+  } else {
+    closeHelpPanel();
+  }
+  
+  // Track event
+  if (typeof logActionEvent === 'function') {
+    logActionEvent('help_toggle', helpPanelOpen ? 'open' : 'close');
+  }
+}
+
+/**
+ * Render the help panel
+ */
+function renderHelpPanel() {
+  // Build capabilities HTML
+  const capabilitiesHtml = AGENT_CAPABILITIES.map(cap => `
+    <div class="mb-3">
+      <div class="flex items-center gap-2 mb-1.5">
+        <span class="text-sm">${cap.icon}</span>
+        <span class="text-[11px] font-semibold text-gray-800">${cap.category}</span>
+      </div>
+      <div class="grid grid-cols-1 gap-1 pl-5">
+        ${cap.examples.map(ex => `
+          <button onclick="useExample('${escapeHtml(ex)}')" 
+                  class="text-left text-[11px] text-gray-600 hover:text-blue-600 hover:bg-blue-50 px-2 py-1 rounded transition-colors truncate">
+            "${ex}"
+          </button>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+  
+  // Build tips HTML
+  const tipsHtml = QUICK_TIPS.map(t => `
+    <div class="flex items-start gap-2 text-[11px]">
+      <span>${t.icon}</span>
+      <span class="text-gray-600">${t.tip}</span>
+    </div>
+  `).join('');
+  
+  const html = `
+    <div class="help-panel fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" 
+         onclick="closeHelpPanel()" data-type="help-overlay">
+      <div class="bg-white rounded-2xl shadow-2xl w-[90%] max-w-md max-h-[80vh] overflow-hidden flex flex-col"
+           onclick="event.stopPropagation()">
+        
+        <!-- Header -->
+        <div class="bg-gradient-to-r from-blue-500 to-indigo-600 text-white p-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="text-xl">🤖</span>
+              <span class="font-semibold">What can I do?</span>
+            </div>
+            <button onclick="closeHelpPanel()" class="text-white/80 hover:text-white text-lg">✕</button>
+          </div>
+          <p class="text-[11px] text-white/80 mt-1">
+            I'm your AI assistant for spreadsheet tasks. Just describe what you need!
+          </p>
+        </div>
+        
+        <!-- Content -->
+        <div class="flex-1 overflow-y-auto p-4 space-y-4">
+          
+          <!-- Capabilities -->
+          <div>
+            <div class="text-[11px] uppercase tracking-wide text-gray-500 mb-2">What I can help with</div>
+            ${capabilitiesHtml}
+          </div>
+          
+          <!-- Tips -->
+          <div class="bg-amber-50 rounded-lg p-3 border border-amber-100">
+            <div class="text-[11px] uppercase tracking-wide text-amber-700 mb-2">Pro Tips</div>
+            <div class="space-y-1.5">
+              ${tipsHtml}
+            </div>
+          </div>
+          
+          <!-- Intelligence Features -->
+          <div class="bg-indigo-50 rounded-lg p-3 border border-indigo-100">
+            <div class="text-[11px] uppercase tracking-wide text-indigo-700 mb-2">✨ Smart Features</div>
+            <div class="space-y-1.5 text-[11px] text-gray-600">
+              <div class="flex items-center gap-2">
+                <span>💬</span>
+                <span><b>Context Memory</b> — I remember our conversation</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span>🔗</span>
+                <span><b>Multi-Step Tasks</b> — Chain commands with "then"</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span>💡</span>
+                <span><b>Proactive Suggestions</b> — I analyze your data automatically</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span>👁️</span>
+                <span><b>Context Visibility</b> — See exactly what I see</span>
+              </div>
+            </div>
+          </div>
+          
+        </div>
+        
+        <!-- Footer -->
+        <div class="border-t border-gray-100 p-3 bg-gray-50">
+          <button onclick="closeHelpPanel()" 
+                  class="w-full py-2 bg-blue-600 text-white text-[11px] font-medium rounded-lg hover:bg-blue-700 transition-colors">
+            Got it, let's go!
+          </button>
+        </div>
+        
+      </div>
+    </div>
+  `;
+  
+  // Insert into body
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+/**
+ * Close the help panel
+ */
+function closeHelpPanel() {
+  helpPanelOpen = false;
+  const overlay = document.querySelector('[data-type="help-overlay"]');
+  if (overlay) {
+    overlay.remove();
+  }
+}
+
+/**
+ * Use an example command
+ */
+function useExample(example) {
+  closeHelpPanel();
+  
+  // Set in input
+  const input = document.getElementById('agentInput');
+  if (input) {
+    input.value = example;
+    input.focus();
+  }
+  
+  showToast('Example loaded - press Enter to run', 'info');
+}
+
+// ============================================
+// HELP BUTTON INTEGRATION
+// ============================================
+
+/**
+ * Render help button in the UI
+ * Called from renderAgentUI in Core module
+ */
+function getHelpButtonHtml() {
+  return `
+    <button onclick="toggleHelpPanel()" 
+            class="quick-action" 
+            title="What can I do?">
+      ❓
+    </button>
+  `;
+}
+
+// ============================================
+// MODULE LOADED
+// ============================================
+
+console.log('📦 Agent Help module loaded');
+</script>
+
+<style>
+.help-panel {
+  animation: fadeIn 0.2s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.help-panel > div {
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+  from { 
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to { 
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+</style>

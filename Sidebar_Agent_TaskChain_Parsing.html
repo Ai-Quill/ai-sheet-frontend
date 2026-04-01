@@ -1,0 +1,375 @@
+<!--
+  @file Sidebar_Agent_TaskChain_Parsing.html
+  @version 1.0.0
+  @created 2026-02-05
+  
+  TASK CHAIN - Parsing Module
+  
+  Contains:
+  - Multi-step command detection
+  - AI chain parsing
+  - Request building
+  
+  Depends on: Sidebar_Agent_TaskChain_State.html, Sidebar_Agent_TaskChain_Context.html
+-->
+
+<script>
+// ============================================
+// MULTI-STEP DETECTION
+// ============================================
+
+/**
+ * Check if a command is multi-step
+ * Called before regular command processing
+ * 
+ * @param {string} command - User command
+ * @return {Promise<boolean>} True if multi-step detected
+ */
+async function checkForMultiStepCommand(command) {
+  if (!command || command.trim().length < 10) return false;
+  
+  // Skip if already executing a chain
+  if (chainExecuting) {
+    console.log('🔗 [TaskChain] Skipping - chain already executing');
+    return false;
+  }
+  
+  // Skip simple formula requests
+  const simpleFormulaPattern = /^(add|create|calculate|compute|make)?\s*(a\s+)?(formula|column)\s+(for|to|that)/i;
+  if (simpleFormulaPattern.test(command)) {
+    console.log('🔗 [TaskChain] Simple formula request - skipping multi-step');
+    return false;
+  }
+  
+  console.log('🔗 [TaskChain] Checking command:', command.substring(0, 80) + '...');
+  
+  // Set parsing flag
+  chainParsing = true;
+  
+  // For complex commands, always ask AI to analyze
+  console.log('🔗 [TaskChain] Complex command - asking AI to analyze...');
+  
+  // Get selected model from UI
+  const selectedModel = document.getElementById('agentModelSelect')?.value || 'GEMINI';
+  console.log('🔗 [TaskChain] Using model from UI:', selectedModel);
+  
+  showParsingProgress('Analyzing your request...');
+  
+  try {
+    // CRITICAL: Always refresh context before sending command
+    // Even if we have context, the user may have:
+    //   - Changed their selection in the sheet
+    //   - Added/removed data
+    //   - Switched sheets
+    // The only exception is when user manually typed a custom range —
+    // in that case, we keep their range but still refresh headers/sample data.
+    let context = window.currentContext || currentSelectionContext || {};
+    
+    // If user hasn't set a custom range, always refresh to get latest selection
+    const shouldRefresh = !userEditedRange || !context.selectionInfo?.dataRange || !context.headers?.length;
+    
+    if (shouldRefresh) {
+      const reason = !context.selectionInfo?.dataRange ? 'missing data' : 
+                     !context.headers?.length ? 'missing headers' : 
+                     !userEditedRange ? 'auto-refresh for latest selection' : 'unknown';
+      console.log('🔗 [TaskChain] Refreshing context (' + reason + ')...');
+      try {
+        const freshContext = await new Promise((resolve, reject) => {
+          google.script.run
+            .withSuccessHandler(resolve)
+            .withFailureHandler(reject)
+            .getAgentContext();
+        });
+        if (freshContext) {
+          if (userEditedRange && context.selectionInfo) {
+            // User has a custom range — keep their range but refresh headers/data
+            freshContext.selectionInfo = {
+              ...freshContext.selectionInfo,
+              range: context.selectionInfo.range,
+              dataRange: context.selectionInfo.dataRange,
+              columnsWithData: context.selectionInfo.columnsWithData,
+              dataStartRow: context.selectionInfo.dataStartRow,
+              dataEndRow: context.selectionInfo.dataEndRow,
+              dataRowCount: context.selectionInfo.dataRowCount,
+              numRows: context.selectionInfo.numRows,
+              isExplicit: true,
+              selectionSource: 'explicit'
+            };
+            console.log('🔗 [TaskChain] Merged: kept custom range, refreshed headers/data');
+          }
+          context = freshContext;
+          currentSelectionContext = freshContext;
+          window.currentContext = freshContext;
+          console.log('🔗 [TaskChain] Context refreshed:', {
+            headers: Object.keys(freshContext.headerRow || {}).length,
+            dataRange: freshContext.selectionInfo?.dataRange,
+            columnsWithData: freshContext.selectionInfo?.columnsWithData?.join(',')
+          });
+        }
+      } catch (refreshError) {
+        console.warn('🔗 [TaskChain] Context refresh failed:', refreshError);
+      }
+    } else {
+      console.log('🔗 [TaskChain] Using existing context (user has custom range)');
+    }
+    
+    const enhancedContext = buildEnhancedContext(context);
+    
+    // Debug: Log what we're sending
+    console.log('🔗 [TaskChain] Sending context to backend:', {
+      hasHeaders: enhancedContext.headers?.length > 0 || Object.keys(enhancedContext.headerRow || {}).length > 0,
+      headerCount: enhancedContext.headers?.length || Object.keys(enhancedContext.headerRow || {}).length,
+      dataRange: enhancedContext.dataRange,  // From buildEnhancedContext (full range)
+      dataStartRow: enhancedContext.dataStartRow,
+      dataEndRow: enhancedContext.dataEndRow,
+      columnsWithData: (enhancedContext.columnsWithData || enhancedContext.selectionInfo?.columnsWithData || []).join(','),
+      emptyColumns: (enhancedContext.emptyColumns || []).slice(0, 5).join(',')
+    });
+    
+    // ============================================
+    // LOCAL SHORTCUT: Sort commands
+    // Sort is a simple, well-defined operation that doesn't need AI reasoning.
+    // Handle it locally to avoid backend timeout issues.
+    // ============================================
+    if (/\b(?:sort|order|arrange)\b/i.test(command)) {
+      const headerRow = enhancedContext.headerRow || context.headerRow || {};
+      const headers = Object.entries(headerRow).filter(([, name]) => name);
+      
+      if (headers.length > 0) {
+        let sortColumnLetter = null;
+        let sortColumnName = null;
+        
+        // Try explicit column letter reference: "column C", "col C"
+        const colLetterMatch = command.match(/(?:column|col\.?)\s+([A-Z])\b/i);
+        if (colLetterMatch) {
+          sortColumnLetter = colLetterMatch[1].toUpperCase();
+          sortColumnName = headerRow[sortColumnLetter] || sortColumnLetter;
+        }
+        
+        // Try matching header names from command text
+        if (!sortColumnLetter) {
+          const cmdLower = command.toLowerCase();
+          // Sort headers by name length descending to prefer longer (more specific) matches
+          const sortedHeaders = headers.slice().sort((a, b) => String(b[1]).length - String(a[1]).length);
+          for (const [col, name] of sortedHeaders) {
+            const headerName = String(name).toLowerCase();
+            const headerWithSpaces = headerName.replace(/_/g, ' ');
+            // Match header name directly or with underscores replaced by spaces
+            if (cmdLower.includes(headerName) || cmdLower.includes(headerWithSpaces)) {
+              sortColumnLetter = col;
+              sortColumnName = name;
+              break;
+            }
+          }
+        }
+        
+        if (sortColumnLetter) {
+          // Determine sort direction
+          const isDescending = /\b(?:descend|desc|highest.*?low|largest.*?small|most.*?least|z.*?a|high.*?low|top.*?bottom|big.*?small)\b/i.test(command);
+          const ascending = !isDescending;
+          
+          // Build data range (include header row for sort to work correctly)
+          const columnsWithData = enhancedContext.columnsWithData || context.selectionInfo?.columnsWithData || Object.keys(headerRow);
+          const dataStartRow = (enhancedContext.dataStartRow || context.selectionInfo?.dataStartRow || 2);
+          const dataEndRow = enhancedContext.dataEndRow || context.selectionInfo?.dataEndRow || 100;
+          const firstCol = columnsWithData[0] || 'A';
+          const lastCol = columnsWithData[columnsWithData.length - 1] || 'A';
+          const sortRange = firstCol + dataStartRow + ':' + lastCol + dataEndRow;
+          
+          const dirLabel = ascending ? 'ascending' : 'descending';
+          const description = 'Sort data by ' + sortColumnName + ' (' + dirLabel + ')';
+          
+          console.log('🔗 [TaskChain] ⚡ Local sort shortcut: ' + sortColumnLetter + ' ' + dirLabel);
+          
+          const sortResult = {
+            isMultiStep: false,
+            isCommand: true,
+            _usedSDKAgent: true,
+            summary: description,
+            clarification: description,
+            outputMode: 'sheet',
+            sheetAction: 'sheetOps',
+            inputRange: sortRange,
+            inputColumns: columnsWithData,
+            steps: [{
+              id: 'step_1',
+              order: 1,
+              action: 'sheetOps',
+              description: description,
+              prompt: command,
+              outputFormat: 'sheetOps',
+              inputColumns: columnsWithData,
+              config: {
+                operations: [{
+                  operation: 'sort',
+                  range: sortRange,
+                  sortBy: [{ column: sortColumnLetter, ascending: ascending }]
+                }]
+              }
+            }]
+          };
+          
+          removeParsingProgress();
+          chainParsing = false;
+          
+          currentChain = sortResult;
+          currentChain.model = selectedModel;
+          currentPlan = sortResult;
+          window.currentPlan = sortResult;
+          renderProposedWorkflow(sortResult);
+          return true;
+        }
+      }
+    }
+    
+    // Call backend to parse the chain
+    const result = await new Promise((resolve, reject) => {
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(reject)
+        .parseTaskChain(command, enhancedContext, selectedModel);
+    });
+    
+    removeParsingProgress();
+    chainParsing = false;
+    
+    console.log('🔗 [TaskChain] AI analysis result:', result);
+    
+    // Log API errors for debugging
+    if (result._apiError) {
+      console.warn('🔗 [TaskChain] API error occurred:', result._apiError);
+      if (result._usedFallback) {
+        console.warn('🔗 [TaskChain] Used local fallback parser');
+      }
+    }
+    
+    // Handle errors
+    if (result.error) {
+      showError(result.error);
+      return false;
+    }
+    
+    // Handle clarification needed (includes rate limit messages)
+    if (result.needsClarification) {
+      // Show clarification request as chat message
+      addAssistantMessage(result.clarification || 'Could you please provide more details about what you want to do?');
+      return true; // Prevent regular processing
+    }
+    
+    // Handle chat-only responses (analyze without sheet actions)
+    if (result.outputMode === 'chat' && result.chatResponse) {
+      console.log('🔗 [TaskChain] Chat-only response detected');
+      if (typeof addAgentMessage === 'function') {
+        addAgentMessage('agent', result.chatResponse);
+      } else {
+        addAssistantMessage(result.chatResponse);
+      }
+      // Show insight-driven suggestions if available
+      if (result.suggestedActions && result.suggestedActions.length > 0 && typeof renderSuggestedActions === 'function') {
+        console.log('🔗 [TaskChain] Rendering', result.suggestedActions.length, 'suggested actions');
+        renderSuggestedActions(result.suggestedActions);
+      }
+      return true;
+    }
+    
+    // Check if we got valid steps
+    if (result.steps && result.steps.length > 0) {
+      console.log(`🔗 [TaskChain] AI proposed workflow with ${result.steps.length} steps`);
+      
+      // Log steps with input/output info
+      result.steps.forEach((step, idx) => {
+        const inputCols = step.inputColumns?.join(',') || 'N/A';
+        const outputCol = step.outputColumn || 'N/A';
+        console.log(`🔗 [TaskChain] Step ${idx + 1}: ${step.action} | input: ${inputCols} → output: ${outputCol}`);
+      });
+      
+      // Normalize and validate steps
+      const validation = normalizeAndValidateSteps(result.steps);
+      
+      if (!validation.valid && validation.reasons.length > 0) {
+        console.log('🔗 [TaskChain] Validation issues:', validation.reasons);
+        // Don't block - the normalization already fixed what it could
+      }
+      
+      console.log('🔗 [TaskChain] ✅ All steps validated successfully');
+      console.log('🔗 [TaskChain] Using model:', selectedModel);
+      
+      // Store chain and input info
+      currentChain = result;
+      currentChain.model = selectedModel;
+      
+      // Also store as currentPlan for compatibility
+      currentPlan = result;
+      window.currentPlan = result;
+      
+      // Render appropriate UI based on result type
+      if (result._usedSDKAgent) {
+        renderProposedWorkflow(result);
+      } else {
+        renderChainConfirmation(result);
+      }
+      
+      return true;
+    }
+    
+    // No steps - let regular processing handle it
+    console.log('🔗 [TaskChain] No multi-step workflow detected');
+    return false;
+    
+  } catch (error) {
+    console.error('🔗 [TaskChain] Error:', error);
+    removeParsingProgress();
+    chainParsing = false;
+    showError('Failed to analyze command: ' + error.message);
+    return false;
+  }
+}
+
+/**
+ * Execute a suggested next action
+ * Reuses the same flow as single-task execution
+ * 
+ * @param {string} command - Command to execute
+ * @param {string} suggestionTitle - Title for tracking
+ */
+function executeNextAction(command, suggestionTitle) {
+  if (!command) return;
+  
+  // Record usage for learning
+  if (lastSuggestionWorkflowId) {
+    recordSuggestionUsage(lastSuggestionWorkflowId, suggestionTitle);
+  }
+  
+  // Remove the suggestions UI
+  const suggestionsEl = document.querySelector('[data-type="chain-suggestions"]');
+  if (suggestionsEl) suggestionsEl.remove();
+  
+  // Set the command in the input
+  const input = document.getElementById('agentInput');
+  if (input) {
+    input.value = command;
+  }
+  
+  // Trigger processing
+  processCommand(command);
+}
+
+/**
+ * Record suggestion usage for learning loop
+ * Called when user clicks a suggestion
+ */
+function recordSuggestionUsage(workflowId, suggestion) {
+  if (!workflowId || !suggestion) return;
+  
+  // Fire and forget - don't block UI
+  google.script.run.recordSuggestionUsage({
+    workflowId: workflowId,
+    suggestion: suggestion,
+    timestamp: new Date().toISOString()
+  });
+  
+  console.log('🎯 [Suggestions] Recorded usage:', suggestion);
+}
+
+console.log('📦 Agent TaskChain Parsing module loaded');
+</script>

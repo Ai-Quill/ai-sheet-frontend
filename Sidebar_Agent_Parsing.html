@@ -1,0 +1,2525 @@
+<!--
+  @file Sidebar_Agent_Parsing.html
+  @version 1.0.0
+  @updated 2026-01-13
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-13): Extracted from Sidebar_Agent.html
+    - Command processing and validation
+    - Message rendering (createMessageHtml)
+    - Local and AI-based command parsing
+    - Multi-column plan creation
+    - Context enrichment for AI
+  
+  ============================================
+  SIDEBAR_AGENT_PARSING - Command Parsing Module
+  ============================================
+  
+  Contains:
+  - processAgentCommand() - Main entry point
+  - addAgentMessage() - Message display
+  - createMessageHtml() - HTML generation for different message types
+  - parseCommand() / parseCommandWithContext() - Command parsing logic
+  - parseCommandLocally() - Local pattern matching
+  - parseCommandWithBackend() - AI-based parsing
+  - createMultiColumnPlan() - Multi-column plan generation
+  - buildIntelligentPrompt() - Prompt engineering
+  
+  Included by: Sidebar_Agent.html
+  Dependencies: Sidebar_i18n.html (for i18n functions)
+-->
+
+<script>
+// ============================================
+// COMMAND PROCESSING
+// ============================================
+
+/**
+ * Update send button state based on execution status
+ * Disables during job execution to prevent duplicate submissions
+ */
+function updateSendButtonState() {
+  const btn = document.getElementById('agentSendBtn');
+  const btnText = document.getElementById('sendBtnText');
+  const textarea = document.getElementById('agentInput');
+  
+  if (!btn) return;
+  
+  if (isExecuting) {
+    btn.disabled = true;
+    btn.classList.add('processing');
+    if (btnText) {
+      btnText.innerHTML = '<i data-lucide="loader" class="icon-sm icon-pulse" style="color:white;"></i>';
+      refreshIcons();
+    }
+    if (textarea) textarea.disabled = true;
+  } else {
+    btn.disabled = false;
+    btn.classList.remove('processing');
+    if (btnText) {
+      btnText.innerHTML = '<i data-lucide="arrow-right" class="icon-sm" style="color:white;stroke-width:2.5;"></i>';
+      refreshIcons();
+    }
+    if (textarea) textarea.disabled = false;
+  }
+}
+
+async function processAgentCommand(presetValue) {
+  console.log('🚀 [ProcessCommand] Starting...', { presetValue: presetValue?.substring?.(0, 30), isExecuting, chainExecuting: typeof chainExecuting !== 'undefined' ? chainExecuting : 'undefined' });
+  
+  // Block if already executing
+  if (isExecuting) {
+    console.log('🚀 [ProcessCommand] Blocked: isExecuting=true');
+    showToast('Please wait for current job to complete', 'warning');
+    return;
+  }
+  
+  // Block if chain is executing
+  if (typeof chainExecuting !== 'undefined' && chainExecuting) {
+    console.log('🚀 [ProcessCommand] Blocked: chainExecuting=true');
+    showToast('Please wait for task chain to complete', 'warning');
+    return;
+  }
+  
+  // Use preset value (from keydown handler) or read from DOM (from button click)
+  const inputEl = document.getElementById('agentInput');
+  const input = presetValue || inputEl?.value?.trim();
+  
+  console.log('🚀 [ProcessCommand] Input:', input?.substring?.(0, 50));
+  
+  if (!input) {
+    console.log('🚀 [ProcessCommand] No input, returning');
+    // Only show toast if called from button click (no presetValue)
+    if (!presetValue) {
+      showToast('Please enter a command', 'error');
+    }
+    return;
+  }
+  
+  // Log command event
+  if (typeof logCommandEvent === 'function') {
+    logCommandEvent(input);
+  }
+  
+  // Add user message
+  addAgentMessage('user', input);
+  if (inputEl) inputEl.value = '';
+  
+  // Check for multi-step command first
+  if (typeof checkForMultiStepCommand === 'function') {
+    console.log('🚀 [ProcessCommand] Checking for multi-step...');
+    const isMultiStep = await checkForMultiStepCommand(input);
+    console.log('🚀 [ProcessCommand] Multi-step result:', isMultiStep);
+    if (isMultiStep) {
+      // Multi-step detected - UI rendered by checkForMultiStepCommand
+      return;
+    }
+  }
+  
+  // Show thinking indicator for single-step
+  console.log('🚀 [ProcessCommand] Processing as single-step command');
+  addAgentMessage('thinking', 'Analyzing your request...');
+  
+  // Parse the command (single-step)
+  parseCommand(input);
+}
+
+/**
+ * Auto-scroll the message area to the bottom
+ */
+function autoScrollMessages() {
+  const scrollArea = document.querySelector('.agent-scroll-area');
+  if (scrollArea) {
+    // Smooth scroll to bottom
+    setTimeout(function() {
+      scrollArea.scrollTo({
+        top: scrollArea.scrollHeight,
+        behavior: 'smooth'
+      });
+    }, 50);
+  }
+}
+
+// ============================================
+// AGENT RESPONSE ACTIONS
+// ============================================
+
+/**
+ * Copy agent response to clipboard
+ */
+function copyAgentResponse(messageId) {
+  const messageEl = document.getElementById(messageId);
+  if (!messageEl) return;
+  
+  const contentEl = messageEl.querySelector('.markdown-content');
+  if (!contentEl) return;
+  
+  const textContent = contentEl.innerText;
+  
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(textContent)
+      .then(() => {
+        showToast('📋 Copied to clipboard', 'success');
+        const button = messageEl.querySelector('button[onclick*="copyAgentResponse"]');
+        if (button) {
+          button.classList.add('bg-green-50', 'text-green-700');
+          setTimeout(() => button.classList.remove('bg-green-50', 'text-green-700'), 1000);
+        }
+      })
+      .catch(err => showToast('Failed to copy', 'error'));
+  } else {
+    // Fallback
+    const textarea = document.createElement('textarea');
+    textarea.value = textContent;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      document.execCommand('copy');
+      showToast('📋 Copied to clipboard', 'success');
+    } catch (err) {
+      showToast('Failed to copy', 'error');
+    }
+    document.body.removeChild(textarea);
+  }
+}
+
+/**
+ * Insert agent response into sheet
+ */
+function insertToSheet(messageId) {
+  const messageEl = document.getElementById(messageId);
+  if (!messageEl) return;
+  
+  // Show options dialog
+  const existingMenu = document.getElementById('insertMenu');
+  if (existingMenu) existingMenu.remove();
+  
+  const menuHtml = `
+    <div id="insertMenu" class="absolute z-50 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-2" style="min-width: 240px;">
+      <div class="text-[11px] font-semibold text-gray-500 px-2 py-1 mb-1">Insert Options</div>
+      <button onclick="executeInsert('${messageId}', 'note')" 
+        class="w-full text-left px-2 py-1.5 text-[11px] hover:bg-gray-50 rounded flex flex-col gap-0.5">
+        <div class="font-medium text-gray-900">📝 Insert as Cell Note</div>
+        <div class="text-[11px] text-gray-500">Add to selected cell as a note</div>
+      </button>
+      <button onclick="executeInsert('${messageId}', 'column')" 
+        class="w-full text-left px-2 py-1.5 text-[11px] hover:bg-gray-50 rounded flex flex-col gap-0.5">
+        <div class="font-medium text-gray-900">📊 Insert in New Column</div>
+        <div class="text-[11px] text-gray-500">Create "AI Summary" column</div>
+      </button>
+      <button onclick="executeInsert('${messageId}', 'sheet')" 
+        class="w-full text-left px-2 py-1.5 text-[11px] hover:bg-gray-50 rounded flex flex-col gap-0.5">
+        <div class="font-medium text-gray-900">📄 Insert in New Sheet</div>
+        <div class="text-[11px] text-gray-500">Create "Analysis" sheet</div>
+      </button>
+      <button onclick="document.getElementById('insertMenu').remove()" 
+        class="w-full text-center px-2 py-1 text-[11px] text-gray-500 hover:text-gray-700 mt-1 border-t border-gray-100">
+        Cancel
+      </button>
+    </div>
+  `;
+  
+  const button = messageEl.querySelector('button[onclick*="insertToSheet"]');
+  if (button) {
+    button.insertAdjacentHTML('afterend', menuHtml);
+    setTimeout(() => {
+      document.addEventListener('click', function closeMenu(e) {
+        const menu = document.getElementById('insertMenu');
+        if (menu && !menu.contains(e.target) && e.target !== button) {
+          menu.remove();
+          document.removeEventListener('click', closeMenu);
+        }
+      });
+    }, 100);
+  }
+}
+
+/**
+ * Execute insert action
+ */
+function executeInsert(messageId, action) {
+  const messageEl = document.getElementById(messageId);
+  if (!messageEl) return;
+  
+  const contentEl = messageEl.querySelector('.markdown-content');
+  if (!contentEl) return;
+  
+  const textContent = contentEl.innerText;
+  
+  const menu = document.getElementById('insertMenu');
+  if (menu) menu.remove();
+  
+  showToast('Inserting...', 'info');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      if (result.success) {
+        showToast(`✅ ${result.message}`, 'success');
+      } else {
+        showToast(`❌ ${result.message}`, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      showToast('Failed to insert: ' + error.message, 'error');
+    })
+    .insertAgentResponse(textContent, action);
+}
+
+/**
+ * Submit feedback (thumbs up/down) for an agent response
+ */
+function submitFeedback(messageId, feedback) {
+  const feedbackEl = document.getElementById('feedback_' + messageId);
+  if (!feedbackEl) return;
+  
+  // Get the last user message as query text
+  const lastUserMsg = [...document.querySelectorAll('[data-type="user"]')].pop();
+  const queryText = lastUserMsg ? lastUserMsg.innerText.trim() : '';
+  
+  // Sanitize queryText to prevent injection in onclick handlers
+  const safeQuery = queryText.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;').substring(0, 200);
+  
+  if (feedback === 'down') {
+    // Show correction options
+    const options = ['too_vague', 'missing_data', 'wrong_numbers', 'too_long', 'needed_chart'];
+    const labels = ['Too vague', 'Missing key data', 'Wrong numbers', 'Too long', 'Needed a chart'];
+    
+    feedbackEl.innerHTML = `
+      <div class="flex flex-wrap gap-1">
+        <span class="text-[10px] text-gray-500">What was wrong?</span>
+        ${options.map((opt, i) => `
+          <button onclick="submitFeedbackWithCategory('${messageId}', '${opt}', '${safeQuery}')"
+            class="px-1.5 py-0.5 text-[10px] bg-red-50 text-red-700 rounded hover:bg-red-100 transition">
+            ${labels[i]}
+          </button>
+        `).join('')}
+      </div>
+    `;
+  } else {
+    // Thumbs up — submit immediately
+    feedbackEl.innerHTML = '<span class="text-[10px] text-green-600">Thanks for the feedback!</span>';
+    google.script.run.submitAnalysisFeedback(queryText, 'up', null, null);
+  }
+}
+
+function submitFeedbackWithCategory(messageId, category, queryText) {
+  const feedbackEl = document.getElementById('feedback_' + messageId);
+  if (feedbackEl) {
+    feedbackEl.innerHTML = '<span class="text-[10px] text-gray-500">Feedback recorded — we\'ll improve!</span>';
+  }
+  google.script.run.submitAnalysisFeedback(queryText, 'down', category, null);
+}
+
+function addAgentMessage(type, content) {
+  const messagesDiv = document.getElementById('agentMessages');
+  const messageHtml = createMessageHtml(type, content);
+  
+  // Remove thinking message if adding a new one
+  if (type !== 'thinking') {
+    const thinkingMsg = messagesDiv.querySelector('[data-type="thinking"]');
+    if (thinkingMsg) thinkingMsg.remove();
+  }
+  
+  // Reset execution lock when a new plan is shown
+  if (type === 'plan') {
+    setExecuting(false);
+  }
+  
+  messagesDiv.insertAdjacentHTML('beforeend', messageHtml);
+  
+  // Hide discovery tools once conversation starts (they're for new chat exploration)
+  if (type === 'user' || type === 'plan') {
+    const discoveryTools = document.getElementById('discoveryTools');
+    if (discoveryTools) discoveryTools.classList.add('hidden');
+  }
+  
+  // Auto-scroll to show new content
+  autoScrollMessages();
+  
+  // Store in session and persist to backend
+  if (type !== 'thinking') {
+    // Map type to role for conversation storage
+    const role = (type === 'user') ? 'user' : 'agent';
+    agentMessages.push({ 
+      role, 
+      type, 
+      content: typeof content === 'string' ? content : JSON.stringify(content), 
+      timestamp: new Date().toISOString() 
+    });
+    
+    // Check if we need to collapse old messages for performance
+    // This keeps DOM lightweight while preserving conversation history
+    if (typeof checkAndCollapseMessages === 'function') {
+      checkAndCollapseMessages();
+    }
+    
+    // Persist conversation to backend (debounced)
+    debouncedPersistConversation();
+  }
+}
+
+// Debounce conversation persistence to avoid too many API calls
+let persistTimeout = null;
+function debouncedPersistConversation() {
+  if (persistTimeout) clearTimeout(persistTimeout);
+  persistTimeout = setTimeout(() => {
+    if (typeof persistConversation === 'function') {
+      persistConversation();
+    }
+  }, 2000); // Persist 2 seconds after last message
+}
+
+/**
+ * Simple Markdown renderer for agent messages
+ * Supports: headers, bold, lists, code blocks, tables
+ */
+function renderMarkdown(text) {
+  if (!text || typeof text !== 'string') return '';
+  
+  let html = escapeHtml(text);
+  
+  // --- Markdown Tables ---
+  // Match table blocks: header row, separator row, then data rows
+  html = html.replace(/((?:^\|.+\|$\n?)+)/gm, function(tableBlock) {
+    const lines = tableBlock.trim().split('\n').filter(l => l.trim());
+    if (lines.length < 2) return tableBlock;
+    
+    // Check for separator row (|---|---|) 
+    const sepIdx = lines.findIndex(l => /^\|[\s:]*-{2,}[\s:]*(\|[\s:]*-{2,}[\s:]*)*\|$/.test(l.trim()));
+    if (sepIdx < 1) return tableBlock; // no separator found or nothing before it
+    
+    // Parse alignment from separator
+    const sepCells = lines[sepIdx].split('|').filter(c => c.trim());
+    const aligns = sepCells.map(c => {
+      const t = c.trim();
+      if (t.startsWith(':') && t.endsWith(':')) return 'center';
+      if (t.endsWith(':')) return 'right';
+      return 'left';
+    });
+    
+    // Header rows (everything before separator)
+    const headerLines = lines.slice(0, sepIdx);
+    const dataLines = lines.slice(sepIdx + 1);
+    
+    let tableHtml = '<div class="overflow-x-auto my-2"><table class="w-full text-[11px] border-collapse border border-gray-200 rounded">';
+    
+    // Render thead
+    tableHtml += '<thead>';
+    headerLines.forEach(hl => {
+      const cells = hl.split('|').filter(c => c !== undefined);
+      // Remove first/last empty from leading/trailing |
+      if (cells[0] !== undefined && cells[0].trim() === '') cells.shift();
+      if (cells.length > 0 && cells[cells.length - 1].trim() === '') cells.pop();
+      tableHtml += '<tr class="bg-gray-100">';
+      cells.forEach((c, i) => {
+        const align = aligns[i] || 'left';
+        tableHtml += '<th class="px-2 py-1.5 font-semibold text-gray-800 border border-gray-200 text-' + align + '">' + c.trim() + '</th>';
+      });
+      tableHtml += '</tr>';
+    });
+    tableHtml += '</thead>';
+    
+    // Render tbody
+    tableHtml += '<tbody>';
+    dataLines.forEach((dl, rowIdx) => {
+      const cells = dl.split('|').filter(c => c !== undefined);
+      if (cells[0] !== undefined && cells[0].trim() === '') cells.shift();
+      if (cells.length > 0 && cells[cells.length - 1].trim() === '') cells.pop();
+      const rowBg = rowIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50';
+      tableHtml += '<tr class="' + rowBg + '">';
+      cells.forEach((c, i) => {
+        const align = aligns[i] || 'left';
+        tableHtml += '<td class="px-2 py-1 text-gray-700 border border-gray-200 text-' + align + '">' + c.trim() + '</td>';
+      });
+      tableHtml += '</tr>';
+    });
+    tableHtml += '</tbody></table></div>';
+    
+    return tableHtml;
+  });
+  
+  // Headers (## Header, ### Subheader)
+  html = html.replace(/^### (.+)$/gm, '<h3 class="text-[12px] font-semibold text-gray-800 mt-3 mb-1.5">$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2 class="text-[13px] font-bold text-gray-900 mt-4 mb-2 pb-1 border-b border-gray-200">$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1 class="text-[14px] font-bold text-gray-900 mt-4 mb-2">$1</h1>');
+  
+  // Bold (**text**)
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-gray-900">$1</strong>');
+  
+  // Italic (*text*)
+  html = html.replace(/\*([^*]+)\*/g, '<em class="italic">$1</em>');
+  
+  // Inline code (`code`)
+  html = html.replace(/`([^`]+)`/g, '<code class="px-1 py-0.5 bg-gray-100 rounded text-[11px] font-mono">$1</code>');
+  
+  // Unordered lists (- item or * item)
+  html = html.replace(/^[*-] (.+)$/gm, '<li class="ml-4 mb-1">$1</li>');
+  
+  // Ordered lists (1. item)
+  html = html.replace(/^\d+\. (.+)$/gm, '<li class="ml-4 mb-1 list-decimal">$1</li>');
+  
+  // Wrap consecutive <li> tags in <ul> or <ol>
+  html = html.replace(/(<li[^>]*>.*?<\/li>\s*)+/gs, function(match) {
+    if (match.includes('list-decimal')) {
+      return '<ol class="list-decimal mb-2">' + match + '</ol>';
+    }
+    return '<ul class="list-disc mb-2">' + match + '</ul>';
+  });
+  
+  // Paragraphs (double newline)
+  html = html.replace(/\n\n/g, '</p><p class="mb-2">');
+  html = '<p class="mb-2">' + html + '</p>';
+  
+  // Single line breaks
+  html = html.replace(/\n/g, '<br>');
+  
+  return html;
+}
+
+function createMessageHtml(type, content) {
+  if (type === 'user') {
+    return `
+      <div class="card p-2 bg-blue-50 border-blue-100" data-type="user">
+        <div class="text-[11px] text-blue-800">${escapeHtml(content)}</div>
+      </div>
+    `;
+  } else if (type === 'thinking') {
+    return `
+      <div class="flex items-center gap-2 px-2 py-1.5 bg-gray-50 rounded text-[11px] text-gray-500" data-type="thinking">
+        <div class="animate-spin h-3 w-3 border-2 border-gray-300 border-t-gray-500 rounded-full"></div>
+          ${content}
+      </div>
+    `;
+  } else if (type === 'plan') {
+    return createPlanMessageHtml(content);
+  } else if (type === 'clarification') {
+    const suggestionsHtml = content.suggestions?.slice(0, 3).map(s => 
+      `<button onclick="useSuggestion(this)" class="example-cmd text-left w-full">"${escapeHtml(s)}"</button>`
+    ).join('') || '';
+    
+    return `
+      <div class="card p-2 bg-amber-50 border-amber-100" data-type="clarification">
+        <div class="flex gap-2 items-start">
+          <span class="text-sm">🤔</span>
+          <div class="flex-1">
+            <p class="text-[11px] text-amber-800 font-medium mb-1.5">${escapeHtml(content.question)}</p>
+            ${suggestionsHtml ? `<div class="space-y-1">${suggestionsHtml}</div>` : ''}
+          </div>
+        </div>
+      </div>
+    `;
+  } else if (type === 'progress') {
+    return `<div class="card p-2" data-type="progress" id="progressCard">${content}</div>`;
+  } else if (type === 'complete') {
+    return `
+      <div class="flex items-center gap-2 px-2 py-1.5 bg-green-50 border border-green-100 rounded text-[11px] text-green-700" data-type="complete">
+        <span>✅</span><span>${content}</span>
+      </div>
+    `;
+  } else if (type === 'error') {
+    return `
+      <div class="flex items-center gap-2 px-2 py-1.5 bg-red-50 border border-red-100 rounded text-[11px] text-red-700" data-type="error">
+        <span>❌</span><span>${content}</span>
+      </div>
+    `;
+  } else if (type === 'chain-confirm' || type === 'chain-progress' || type === 'suggested-actions') {
+    // For chain messages and suggested actions, the caller already builds the HTML
+    // Just return the content as-is with wrapper
+    return `<div data-type="${type}">${content}</div>`;
+  } else if (type === 'agent') {
+    // Generic agent message - support Markdown for rich formatting
+    const renderedContent = renderMarkdown(content);
+    const messageId = 'msg_' + Date.now();
+    
+    return `
+      <div class="card p-3 bg-white border-gray-200" data-type="agent" id="${messageId}">
+        <div class="markdown-content text-[11px] text-gray-700">
+          ${renderedContent}
+        </div>
+        
+        <!-- Action Bar -->
+        <div class="flex items-center gap-2 mt-3 pt-2 border-t border-gray-100">
+          <button 
+            onclick="copyAgentResponse('${messageId}')" 
+            class="flex items-center gap-1 px-2 py-1 text-[11px] text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded transition"
+            title="Copy to clipboard">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+            </svg>
+            <span>Copy</span>
+          </button>
+          
+          <button 
+            onclick="insertToSheet('${messageId}')" 
+            class="flex items-center gap-1 px-2 py-1 text-[11px] text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded transition"
+            title="Insert into sheet">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+            </svg>
+            <span>Insert</span>
+          </button>
+          
+          <!-- Feedback Buttons -->
+          <div class="flex items-center gap-1 ml-2" id="feedback_${messageId}">
+            <button 
+              onclick="submitFeedback('${messageId}', 'up')"
+              class="flex items-center px-1.5 py-1 text-[11px] text-gray-400 hover:text-green-600 hover:bg-green-50 rounded transition"
+              title="Helpful">
+              <span>👍</span>
+            </button>
+            <button 
+              onclick="submitFeedback('${messageId}', 'down')"
+              class="flex items-center px-1.5 py-1 text-[11px] text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition"
+              title="Not helpful">
+              <span>👎</span>
+            </button>
+          </div>
+          
+          <div class="ml-auto text-[11px] text-gray-400">
+            ${content.length} chars
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  return '';
+}
+
+/**
+ * Suggest classification options based on detected language
+ * Uses centralized i18n data from Sidebar_i18n.html
+ */
+function suggestClassificationOptions(content) {
+  // Combine command and column headers to detect language
+  const textToCheck = [
+    content.originalCommand || '',
+    ...(content.outputColumns || []).map(col => {
+      const prompt = content.columnPrompts?.[col] || '';
+      const match = prompt.match(/Generate "([^"]+)"/);
+      return match ? match[1] : '';
+    })
+  ].join(' ');
+  
+  // Use centralized i18n function (from Sidebar_i18n.html)
+  if (typeof getClassificationOptionsFromText === 'function') {
+    return getClassificationOptionsFromText(textToCheck);
+  }
+  
+  // Fallback if i18n module not loaded
+  return 'Good, Bad, Neutral';
+}
+
+/**
+ * Create plan message HTML (extracted for readability)
+ */
+function createPlanMessageHtml(content) {
+  const selectedModel = document.getElementById('agentModelSelect')?.value || content.model;
+  const estimate = content.estimate;
+  
+  // Get language-appropriate options for classification columns
+  const suggestedOptions = suggestClassificationOptions(content);
+  
+  // Check if any output column is a classification column
+  const hasClassificationColumn = content.isMultiColumn && content.outputColumns?.some(col => {
+    const prompt = content.columnPrompts?.[col] || '';
+    const headerMatch = prompt.match(/Generate "([^"]+)"/);
+    const header = headerMatch ? headerMatch[1] : '';
+    return typeof isClassificationHeader === 'function' && isClassificationHeader(header);
+  });
+  
+  // Auto-populate formatHint if classification columns detected and not already set
+  if (hasClassificationColumn && !content.formatHint) {
+    content.formatHint = suggestedOptions;
+    console.log('📊 Auto-populated classification options:', suggestedOptions);
+  }
+  
+  // Build specific inference message
+  let inferenceDetails = [];
+  if (content.confidence === 'medium' || content.confidence === 'low') {
+    if (content.inputRange && !content.originalCommand?.toLowerCase().includes(content.inputRange.split(':')[0].toLowerCase())) {
+      inferenceDetails.push('input range');
+    }
+    if (content.outputColumns?.length > 0) {
+      const firstOut = content.outputColumns[0].toLowerCase();
+      if (!content.originalCommand?.toLowerCase().includes(' ' + firstOut + ' ') && 
+          !content.originalCommand?.toLowerCase().includes(' ' + firstOut + ',') &&
+          !content.originalCommand?.toLowerCase().endsWith(' ' + firstOut)) {
+        inferenceDetails.push('output column');
+      }
+    }
+  }
+  
+  const confidenceHtml = inferenceDetails.length > 0 ? `
+    <div class="text-[8px] px-1.5 py-0.5 bg-blue-50 rounded text-blue-500 mb-1.5">💡 Auto-detected: ${inferenceDetails.join(', ')}</div>
+  ` : '';
+  
+  const inputCol = content.inputColumn || content.inputRange?.charAt(0) || 'A';
+  const suggestedOutput = String.fromCharCode(inputCol.charCodeAt(0) + 1);
+  const currentOutput = content.outputColumns?.[0] || suggestedOutput;
+  
+  const colOptions = 'ABCDEFGHIJKLMNOP'.split('').map(c => 
+    `<option value="${c}" ${c === currentOutput ? 'selected' : ''}>${c}</option>`
+  ).join('');
+  
+  // Formula option HTML
+  const formulaOptionHtml = content._formulaOption ? `
+  <div class="pt-2 border-t border-gray-200 mt-2" id="formulaOptionContainer">
+    <div class="bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200 rounded-lg p-2.5 shadow-sm">
+      <div class="flex items-start gap-2 mb-2">
+        <div class="w-6 h-6 rounded-full bg-orange-100 flex items-center justify-center flex-shrink-0">
+          <span class="text-sm">⚡</span>
+        </div>
+        <div class="flex-1 min-w-0">
+          <p class="text-[11px] font-semibold text-gray-800">Formula Alternative</p>
+          <p class="text-[11px] text-gray-500">May not work for all data patterns</p>
+        </div>
+      </div>
+      
+      <div class="bg-white/60 rounded px-2 py-1.5 mb-2">
+        <p class="text-[11px] text-orange-700 leading-relaxed">
+          <span class="font-medium">⚠ Note:</span> ${escapeHtml(content._formulaOption.warning || 'Requires valid date format')}
+        </p>
+      </div>
+      
+      <div id="formulaConfirmButtons">
+        <button onclick="applyFormulaDirectFromPlan()" class="w-full text-[11px] font-medium px-3 py-1.5 bg-green-500 text-white rounded-md hover:bg-green-600 transition-colors shadow-sm">
+          ⚡ Apply Formula
+        </button>
+      </div>
+    </div>
+  </div>
+  ` : '';
+  
+  // Options section HTML - only show if there are classification columns AND no AI-driven options
+  const hasAIDrivenOptions = content.columnClassificationOptions && Object.keys(content.columnClassificationOptions).length > 0;
+  let optionsSectionHtml = '';
+  
+  if (hasClassificationColumn) {
+    if (hasAIDrivenOptions) {
+      // AI has determined per-column options - show read-only summary, no manual input needed
+      const optionsSummary = Object.entries(content.columnClassificationOptions)
+        .filter(([col, opts]) => opts)
+        .map(([col, opts]) => `${col}: ${opts}`)
+        .join(' | ');
+      optionsSectionHtml = `
+        <div class="flex items-center gap-1.5 mt-1.5 p-1.5 bg-green-50 rounded border border-green-200">
+          <span class="text-green-700 text-[11px] font-medium">🤖 AI Options:</span>
+          <span class="flex-1 text-[11px] text-green-600 truncate" title="${escapeHtml(optionsSummary)}">${escapeHtml(optionsSummary)}</span>
+        </div>
+      `;
+    } else {
+      // No AI options - allow manual input (but use onchange, not oninput)
+      optionsSectionHtml = `
+        <div class="flex items-center gap-1.5 mt-1.5 p-1.5 bg-amber-50 rounded border border-amber-200">
+          <span class="text-amber-700 text-[11px] font-medium">🏷️ Options:</span>
+          <input type="text" id="planFormatHint" class="flex-1 text-[11px] px-1.5 py-1 border border-amber-300 rounded bg-white focus:ring-1 focus:ring-amber-400" placeholder="${suggestedOptions}" value="${content.formatHint || ''}" onchange="updatePlanFormat(this.value)" onblur="updatePlanFormat(this.value)">
+        </div>
+        <p class="text-[8px] text-amber-600 mt-0.5">Options for classification columns (auto-detected language)</p>
+      `;
+    }
+  }
+  
+  // Multi-column HTML
+  const multiColumnHtml = content.isMultiColumn ? `
+  <div class="pt-1.5 border-t border-gray-200 mt-1.5 space-y-1">
+    ${content.outputColumns.map((col) => {
+      const prompt = content.columnPrompts?.[col] || '';
+      const headerMatch = prompt.match(/Generate "([^"]+)"/);
+      const taskMatch = prompt.match(/Task: (.+?)(?:\n|$)/);
+      const targetHeader = headerMatch ? headerMatch[1] : (taskMatch ? taskMatch[1].substring(0, 30) + '...' : col);
+      const hasValidation = prompt.includes('Output MUST be exactly one of') || prompt.includes('Preferred output:');
+      const hasCustomPrompt = prompt.includes('Task:') && !prompt.includes('Generate "');
+      return `
+        <div class="flex items-center gap-1.5 px-1.5 py-1 bg-white rounded border border-gray-100">
+          <span class="font-mono font-bold text-blue-600 text-[11px]">${col}</span>
+          <span class="text-gray-500 flex-1 truncate text-[11px]" title="${escapeHtml(prompt.substring(0, 200))}">${escapeHtml(targetHeader)}${hasValidation ? ' 🏷️' : ''}${hasCustomPrompt ? ' 📝' : ''}</span>
+          <input type="checkbox" checked class="h-3 w-3" id="colCheck${col}" onchange="toggleColumnTask('${col}')">
+        </div>
+      `;
+    }).join('')}
+    ${optionsSectionHtml}
+  </div>
+  ` : `
+  <div class="flex justify-between items-center pt-1.5 border-t border-gray-200 mt-1.5">
+    <span class="text-gray-500">→</span>
+    <select id="planOutputCol" class="text-[11px] px-1.5 py-1 border border-gray-200 rounded bg-white" onchange="updatePlanOutput(this.value)">${colOptions}</select>
+  </div>
+  <div class="flex justify-between items-center">
+    <span class="text-gray-500">Format:</span>
+    <input type="text" id="planFormatHint" class="text-[11px] px-1.5 py-1 border border-gray-200 rounded bg-white w-20 text-right" placeholder="e.g. X years" value="${content.formatHint || ''}" onchange="updatePlanFormat(this.value)">
+  </div>
+  `;
+  
+  // Build range editor HTML - allows user to modify the auto-detected range
+  const rangeEditorHtml = `
+    <div class="flex justify-between items-center">
+      <span class="text-gray-500">Range:</span>
+      <div class="flex items-center gap-1">
+        <input type="text" id="planInputRange" 
+          class="font-mono text-gray-700 text-[11px] px-1.5 py-0.5 border border-gray-200 rounded bg-white w-24 text-right focus:ring-1 focus:ring-blue-400 focus:border-blue-400" 
+          value="${content.inputRange}" 
+          title="Click to edit the data range"
+          onchange="updatePlanRange(this.value)"
+          onblur="updatePlanRange(this.value)">
+        <button onclick="refreshRangeFromSelection()" class="text-blue-500 hover:text-blue-700 p-0.5" title="Use current selection">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+        </button>
+      </div>
+    </div>
+  `;
+  
+  return `
+    <div class="card p-2" data-type="plan">
+      <div class="flex gap-2 mb-2">
+        <span class="text-sm">🤖</span>
+        <p class="text-[11px] text-gray-600 flex-1">${content.summary}</p>
+      </div>
+      ${confidenceHtml}
+      <div class="bg-gray-50 rounded p-2 text-[11px] space-y-1 mb-2">
+        ${rangeEditorHtml}
+        <div class="flex justify-between"><span class="text-gray-500">Task:</span><span class="text-gray-700">${content.taskType}</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Rows:</span><span class="font-semibold" id="planRowCount">${content.rowCount}</span></div>
+        ${estimate ? `<div class="flex justify-between"><span class="text-gray-500">Cost:</span><span class="text-green-600 font-medium" id="planCostEstimate">${estimate.cost?.formatted || '<$0.01'}</span></div>` : ''}
+        ${formulaOptionHtml}
+        ${multiColumnHtml}
+      </div>
+      <div class="flex gap-1.5" id="planActionButtons">
+        <button onclick="executePlan()" class="btn btn-primary btn-sm flex-1">▶ Run</button>
+        <button onclick="editPlan()" class="btn btn-outline btn-sm">✏</button>
+      </div>
+    </div>
+  `;
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// ============================================
+// COMMAND PARSING
+// ============================================
+
+/**
+ * Main parse function - now context-aware
+ * Uses the real-time tracked selection context
+ * Always recaptures context to ensure freshness (handles sheet changes)
+ */
+function parseCommand(input) {
+  console.log('📋 Recapturing context to ensure freshness...');
+  
+  // Always recapture context before parsing to handle sheet changes
+  google.script.run
+    .withSuccessHandler(function(freshContext) {
+      // If user has a custom range, merge it with the fresh data
+      if (userEditedRange && currentSelectionContext?.selectionInfo) {
+        const customInfo = currentSelectionContext.selectionInfo;
+        freshContext.selectionInfo = {
+          ...freshContext.selectionInfo,
+          range: customInfo.range,
+          dataRange: customInfo.dataRange,
+          columnsWithData: customInfo.columnsWithData,
+          dataStartRow: customInfo.dataStartRow,
+          dataEndRow: customInfo.dataEndRow,
+          dataRowCount: customInfo.dataRowCount,
+          numRows: customInfo.numRows,
+          isExplicit: true,
+          selectionSource: 'explicit'
+        };
+        console.log('📋 Merged custom range with fresh data');
+      }
+      
+      // Sync both context variables
+      currentSelectionContext = freshContext;
+      window.currentContext = freshContext;
+      
+      console.log('📋 Fresh context captured for parsing:', {
+        sheetName: freshContext.sheetName,
+        dataRange: freshContext.selectionInfo?.dataRange,
+        columnsWithData: freshContext.selectionInfo?.columnsWithData?.join(','),
+        headers: Object.keys(freshContext.headerRow || {}).join(',')
+      });
+      
+      // Update the selection indicator UI with fresh context
+      if (typeof updateSelectionIndicator === 'function') {
+        updateSelectionIndicator(freshContext);
+      }
+      
+      parseCommandWithContext(input, freshContext);
+    })
+    .withFailureHandler(function(err) {
+      console.error('Failed to capture context:', err);
+      addAgentMessage('error', 'Failed to read sheet context. Please try again.');
+    })
+    .getAgentContext();
+}
+
+/**
+ * Parse command with sheet context
+ * Strategy:
+ * 1. Try local parsing for fast, well-known patterns
+ * 2. If local fails or returns low confidence, use AI parsing
+ * 3. AI gets rich context to handle any command intelligently
+ */
+function parseCommandWithContext(input, context) {
+  const lower = input.toLowerCase();
+  
+  // Check for multi-column fill scenarios using i18n patterns
+  // Supports multiple languages (English, Vietnamese, Spanish, French, German, etc.)
+  // See Sidebar_i18n.html for full list of supported patterns
+  
+  // Quick action detection (explicit)
+  const isFillAllSuggestion = lower.includes('fill all columns from') || 
+                              lower.includes('điền tất cả các cột');
+  
+  // Use i18n functions for multi-language support
+  const isGenericFillCommand = isFillAllCommand(lower);
+  const isSingleColumnSpecific = isSingleColumnCommand(lower);
+  
+  // NOTE: Multi-column mode includes ALL data columns as input context.
+  // For single-column calculations (e.g., "calculate outstanding days from date"),
+  // users should select ONLY the date column, not the entire table.
+  // This allows flexibility for both multi-column tasks (Product + Brand → Description)
+  // and single-column tasks (Date → Days Outstanding).
+  
+  const shouldUseMultiColumn = (
+    context.selectionInfo && 
+    context.selectionInfo.isTable && 
+    context.selectionInfo.emptyColumns.length > 0 &&
+    (isFillAllSuggestion || isGenericFillCommand) &&
+    !isSingleColumnSpecific
+  );
+  
+  if (shouldUseMultiColumn) {
+    const detectedLang = detectInputLanguage(input);
+    console.log('📊 Multi-column table fill detected:', {
+      language: detectedLang,
+      isFillAllSuggestion,
+      isGenericFillCommand,
+      emptyColumnCount: context.selectionInfo.emptyColumns.length
+    });
+    
+    const plan = createMultiColumnPlan(input, context);
+    if (plan) {
+      showPlan(plan, input);
+      return;
+    }
+  }
+  
+  // Try local parsing for well-known patterns (fast path)
+  const plan = parseCommandLocally(input, context);
+  
+  // CRITICAL FIX: Auto-expand single-column to multi-column for classification tasks
+  // This logic was previously only in handleAIParsedPlan, now applied to local parsing too
+  if (plan && plan.inputRange) {
+    expandClassificationInputIfNeeded(plan, context, input);
+  }
+  
+  if (plan && plan.confidence === 'high') {
+    // High confidence local parse - use it directly
+    showPlan(plan, input);
+  } else if (plan && plan.confidence === 'medium') {
+    // Medium confidence - use local plan but could improve with AI
+    showPlan(plan, input);
+  } else {
+    // No local match or low confidence - use AI parsing
+    // AI will use the rich context to figure out the right plan
+    console.log('🤖 Using AI parsing for command:', input);
+    parseCommandWithBackend(input);
+  }
+}
+
+/**
+ * Helper to show a plan with proper model and cost estimate
+ * For multi-column plans, fetches AI-driven classification options
+ */
+function showPlan(plan, originalCommand) {
+  const selectedModel = document.getElementById('agentModelSelect')?.value || plan.model;
+  plan.model = selectedModel;
+  plan.originalCommand = originalCommand;
+  
+  // For multi-column plans, get AI-driven classification options
+  if (plan.isMultiColumn && plan._columnHeaders && plan._columnHeaders.length > 0) {
+    console.log('📊 Fetching AI-driven classification options for columns:', plan._columnHeaders.map(c => c.column).join(', '));
+    
+    fetchClassificationOptions(plan._columnHeaders, function(columnOptions) {
+      if (columnOptions) {
+        plan.columnClassificationOptions = columnOptions;
+        console.log('✓ AI classification options received:', columnOptions);
+        
+        // IMMEDIATELY apply options to prompts (don't wait for user interaction)
+        applyClassificationOptionsToPrompts(plan, columnOptions);
+      }
+      
+      // Continue with cost estimate
+      fetchCostEstimate(plan, function(estimate) {
+        plan.estimate = estimate;
+        currentPlan = plan;
+        
+        // Log plan event
+        if (typeof logPlanEvent === 'function') {
+          logPlanEvent(plan);
+        }
+        
+        addAgentMessage('plan', plan);
+      });
+    });
+  } else {
+    // No multi-column, continue as before
+    fetchCostEstimate(plan, function(estimate) {
+      plan.estimate = estimate;
+      currentPlan = plan;
+      
+      // Log plan event
+      if (typeof logPlanEvent === 'function') {
+        logPlanEvent(plan);
+      }
+      
+      addAgentMessage('plan', plan);
+      // Trigger format update if auto-populated
+      if (currentPlan.formatHint) {
+        setTimeout(function() { updatePlanFormat(currentPlan.formatHint); }, 50);
+      }
+    });
+  }
+}
+
+/**
+ * Auto-expand single-column input to multi-column for classification/scoring tasks
+ * When classifying leads, ALL data columns should be used as context, not just one
+ * 
+ * @param {Object} plan - The parsed plan object to modify
+ * @param {Object} context - The sheet context with selection info
+ * @param {string} originalInput - The original user command
+ */
+function expandClassificationInputIfNeeded(plan, context, originalInput) {
+  const classifyTasks = ['classify', 'score', 'categorize', 'evaluate', 'analyze', 'rate'];
+  const isClassifyTask = classifyTasks.includes(plan.taskType?.toLowerCase()) || 
+                         originalInput.toLowerCase().match(/classify|categorize|score|evaluate|based on/i);
+  
+  const selInfo = context?.selectionInfo;
+  const columnsWithData = selInfo?.columnsWithData || [];
+  
+  // Check if user explicitly mentioned a specific column (e.g., "column G", "col A")
+  // If so, respect their choice and don't auto-expand
+  const explicitColumnMatch = originalInput.match(/(?:column|col\.?)\s+([A-Z])/i);
+  const hasExplicitColumn = explicitColumnMatch && !originalInput.toLowerCase().includes('based on');
+  
+  if (hasExplicitColumn) {
+    console.log('📊 User specified explicit column (' + explicitColumnMatch[1] + ') - skipping auto-expand');
+    return;
+  }
+  
+  // If this is a classification task and we have a single-column input but multiple data columns exist
+  if (isClassifyTask && columnsWithData.length > 1 && plan.inputRange) {
+    const currentRangeMatch = plan.inputRange.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+    if (currentRangeMatch) {
+      const startCol = currentRangeMatch[1].toUpperCase();
+      const endCol = currentRangeMatch[3].toUpperCase();
+      
+      // Check if current range is single-column
+      if (startCol === endCol) {
+        // Expand to include all data columns
+        const firstDataCol = columnsWithData[0];
+        const lastDataCol = columnsWithData[columnsWithData.length - 1];
+        const startRow = currentRangeMatch[2];
+        const endRow = currentRangeMatch[4];
+        
+        const expandedRange = `${firstDataCol}${startRow}:${lastDataCol}${endRow}`;
+        console.log('🔄 AUTO-EXPANDING for classification: ' + plan.inputRange + ' → ' + expandedRange);
+        console.log('   Reason: Classification needs full row context (' + columnsWithData.join(', ') + ')');
+        
+        plan.inputRange = expandedRange;
+        plan.inputColumns = columnsWithData;
+        plan.isMultiColumnInput = true;
+        plan.hasMultipleInputColumns = true; // Flag for execution
+        
+        // Build inputColumnHeaders from selection info
+        plan.inputColumnHeaders = {};
+        columnsWithData.forEach(col => {
+          const header = selInfo?.headers?.find(h => h.column === col);
+          if (header && header.name) {
+            plan.inputColumnHeaders[col] = header.name;
+          }
+        });
+        
+        // Update the summary to reflect multi-column input
+        if (plan.inputColumnHeaders && Object.keys(plan.inputColumnHeaders).length > 0) {
+          const headersList = columnsWithData.map(c => plan.inputColumnHeaders[c] || c).join(', ');
+          plan.summary = `I'll use ${headersList} to ${plan.taskType || 'classify'} and write results to column ${plan.outputColumns?.join(', ') || ''}.`;
+          
+          // ALSO enhance the prompt for multi-column context
+          // For classification, provide column context so AI understands the full row data
+          const columnContext = columnsWithData.map(col => {
+            const header = plan.inputColumnHeaders[col] || `Column ${col}`;
+            return `- ${col}: ${header}`;
+          }).join('\n');
+          
+          // Enhance prompt with column context
+          const originalPrompt = plan.prompt || '';
+          if (originalPrompt.includes('{{input}}')) {
+            plan.originalPrompt = originalPrompt;
+            plan.prompt = `You have the following data columns:\n${columnContext}\n\n` +
+              `Based on ALL this information, ${originalPrompt.replace('Text:', 'classify this row:')}`;
+            console.log('📊 Enhanced prompt for multi-column classification');
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Detect actual task type from prompts and headers
+ * Returns: classify, translate, summarize, extract, or custom
+ */
+function detectTaskTypeFromPrompts(columnPrompts, emptyColumns) {
+  const allPrompts = Object.values(columnPrompts).join(' ').toLowerCase();
+  const allHeaders = emptyColumns.map(c => (c.header || '').toLowerCase()).join(' ');
+  const combined = allPrompts + ' ' + allHeaders;
+  
+  // Check for classification indicators
+  const classifyPatterns = [
+    /classify/i, /categorize/i, /category/i, /type/i, /class/i,
+    /small|medium|large/i, /hot|warm|cold/i, /high|medium|low/i,
+    /positive|negative|neutral/i, /yes|no/i, /good|bad/i,
+    /exactly one of/i, /must be/i, /rate|rating|score/i, /evaluate/i,
+    /sentiment/i, /priority/i, /status/i, /level/i, /tier/i, /grade/i
+  ];
+  
+  for (const pattern of classifyPatterns) {
+    if (pattern.test(combined)) {
+      return 'classify';
+    }
+  }
+  
+  // Check for translation
+  if (/translat|dịch|翻译|traducir/i.test(combined)) {
+    return 'translate';
+  }
+  
+  // Check for summarization
+  if (/summariz|tóm tắt|summary|摘要/i.test(combined)) {
+    return 'summarize';
+  }
+  
+  // Check for extraction
+  if (/extract|trích xuất|提取|email|phone|url|link/i.test(combined)) {
+    return 'extract';
+  }
+  
+  return 'custom';
+}
+
+/**
+ * Create a multi-column plan for filling a table
+ * Uses AI-driven prompts based on column headers - no if-else pattern matching!
+ * The AI understands context from the header name itself.
+ */
+function createMultiColumnPlan(input, context) {
+  const info = context.selectionInfo;
+  
+  // Debug logging for table detection
+  console.log('📊 createMultiColumnPlan called');
+  console.log('  selectionInfo:', info);
+  if (info) {
+    console.log('  columnsWithData:', info.columnsWithData);
+    console.log('  emptyColumns:', info.emptyColumns?.map(c => c.column + '(' + c.header + ')'));
+    console.log('  sourceColumn:', info.sourceColumn);
+  }
+  
+  if (!info || !info.emptyColumns || info.emptyColumns.length === 0) {
+    console.log('  ❌ No empty columns detected - returning null');
+    return null;
+  }
+  
+  const sourceCol = info.sourceColumn;
+  if (!sourceCol) {
+    console.log('  ❌ No source column - returning null');
+    return null;
+  }
+  
+  // MULTI-COLUMN INPUT: Check if there are multiple input columns
+  const inputColumns = info.columnsWithData || [sourceCol];
+  const hasMultipleInputs = inputColumns.length > 1;
+  
+  console.log('📊 Input columns detected:', inputColumns.join(', '), hasMultipleInputs ? '(multi-column input)' : '(single column)');
+  
+  // Use selection-based data range instead of whole-column range
+  let sourceData;
+  if (info.dataStartRow && info.dataEndRow) {
+    // For multi-column input, use range that spans all input columns
+    const firstInputCol = inputColumns[0];
+    const lastInputCol = inputColumns[inputColumns.length - 1];
+    const inputRangeStr = hasMultipleInputs 
+      ? `${firstInputCol}${info.dataStartRow}:${lastInputCol}${info.dataEndRow}`
+      : `${sourceCol}${info.dataStartRow}:${sourceCol}${info.dataEndRow}`;
+    
+    sourceData = {
+      hasData: true,
+      range: inputRangeStr,
+      rowCount: info.dataRowCount || info.numRows,
+      startRow: info.dataStartRow,
+      endRow: info.dataEndRow
+    };
+    console.log('  ✓ Using selection-based range:', sourceData.range);
+  } else {
+    sourceData = context.columnDataRanges[sourceCol];
+    console.log('  Using fallback whole-column range:', sourceData?.range);
+  }
+  if (!sourceData || !sourceData.hasData) {
+    console.log('  ❌ No source data - returning null');
+    return null;
+  }
+  
+  // Build source header context - include all input column headers for multi-column input
+  let sourceHeader;
+  let inputColumnHeaders = {};  // Map of column -> header name
+  
+  if (hasMultipleInputs) {
+    const headerParts = [];
+    inputColumns.forEach(col => {
+      const header = info.headers?.find(h => h.column === col)?.name || 
+                    context?.headerRow?.[col] || 
+                    `Column ${col}`;
+      headerParts.push(header);
+      inputColumnHeaders[col] = header;
+    });
+    sourceHeader = headerParts.join(', ');
+    console.log('  📊 Multi-input headers:', sourceHeader);
+  } else {
+    sourceHeader = info.headers?.find(h => h.column === sourceCol)?.name || 'Input';
+    inputColumnHeaders[sourceCol] = sourceHeader;
+  }
+  
+  // Get validation rules for output columns
+  const columnValidation = info.columnValidation || {};
+  
+  // Debug: show what validation was received from server
+  console.log('📊 Column validation received from server:', JSON.stringify(columnValidation));
+  
+  // Get custom prompts from prompt row (if detected)
+  const customPrompts = info.columnPrompts || {};
+  if (Object.keys(customPrompts).length > 0) {
+    console.log('📋 Custom prompts detected from row ' + info.promptRowNum + ':', Object.keys(customPrompts));
+  }
+  
+  // Build column prompts - use custom prompts if available, otherwise infer from header
+  const columnPrompts = {};
+  const outputColumns = [];
+  const taskDescriptions = [];
+  
+  info.emptyColumns.forEach(col => {
+    const targetHeader = col.header || `Column ${col.column}`;
+    const validation = columnValidation[col.column];
+    
+    // Check for custom prompt (from prompt row above headers)
+    const customPrompt = customPrompts[col.column] || col.prompt || col.customPrompt;
+    
+    let prompt;
+    if (customPrompt) {
+      // Use custom prompt with proper formatting - pass multi-column info
+      prompt = buildCustomPrompt(sourceHeader, targetHeader, customPrompt, hasMultipleInputs, inputColumnHeaders);
+      console.log('  ✓ Using custom prompt for ' + col.column + ': ' + customPrompt.substring(0, 50) + '...');
+    } else {
+      // Fall back to intelligent prompt based on header name
+      prompt = buildIntelligentPrompt(sourceHeader, targetHeader, validation);
+    }
+    
+    columnPrompts[col.column] = prompt;
+    outputColumns.push(col.column);
+    
+    let taskDesc = `${targetHeader} → ${col.column}`;
+    if (customPrompt) {
+      taskDesc += ' [custom]';
+    } else if (validation?.type === 'list') {
+      taskDesc += ` [${validation.values.length} options]`;
+    }
+    taskDescriptions.push(taskDesc);
+  });
+  
+  // Debug: show actual validation contents
+  if (Object.keys(columnValidation).length > 0) {
+    console.log('📊 Column validation detected:');
+    Object.entries(columnValidation).forEach(([col, val]) => {
+      console.log(`  ${col}: type=${val.type}, values=[${val.values?.join(', ')}]`);
+    });
+  } else {
+    console.log('📊 No column validation detected (no dropdowns)');
+  }
+  
+  // Build summary with multi-column awareness
+  const inputDesc = hasMultipleInputs 
+    ? `columns ${inputColumns.join(', ')} (${Object.values(inputColumnHeaders).join(', ')})` 
+    : sourceData.range;
+  const summary = `I'll use ${inputDesc} to fill ${outputColumns.length} columns: ${taskDescriptions.join(', ')}`;
+  
+  // Detect actual task type from prompts/headers (not just 'Multi-task')
+  const detectedTaskType = detectTaskTypeFromPrompts(columnPrompts, info.emptyColumns);
+  
+  const plan = {
+    summary: summary,
+    inputRange: sourceData.range,
+    inputColumn: sourceCol,
+    inputColumns: inputColumns,  // NEW: All input columns for multi-column input
+    inputColumnHeaders: inputColumnHeaders,  // NEW: Map of column -> header name
+    hasMultipleInputColumns: hasMultipleInputs,  // NEW: Flag for multi-column input
+    taskType: detectedTaskType,
+    outputColumns: outputColumns,
+    columnPrompts: columnPrompts,
+    columnValidation: columnValidation, // Store validation info for HARD constraint decisions
+    model: 'GEMINI',
+    rowCount: sourceData.rowCount,
+    prompt: columnPrompts[outputColumns[0]],
+    confidence: 'high',
+    isMultiColumn: true,
+    // Store header info for AI-driven classification options
+    _columnHeaders: info.emptyColumns.map(col => ({
+      column: col.column,
+      header: col.header || `Column ${col.column}`
+    }))
+  };
+  
+  console.log('📋 Plan created with', hasMultipleInputs ? `${inputColumns.length} input columns` : 'single input column');
+  
+  return plan;
+}
+
+/**
+ * Apply AI-determined classification options to prompts
+ * ONLY uses HARD constraints for columns with actual data validation (dropdown)
+ * For columns without validation, AI suggestions are just hints - let AI be smart
+ * 
+ * @param {Object} plan - The execution plan
+ * @param {Object} columnOptions - AI-determined options per column {D: 'Positive, Negative, Neutral', ...}
+ */
+function applyClassificationOptionsToPrompts(plan, columnOptions) {
+  if (!plan.columnPrompts || !columnOptions) return;
+  
+  const validation = plan.columnValidation || {};
+  
+  Object.keys(plan.columnPrompts).forEach(col => {
+    const aiOptions = columnOptions[col];
+    if (!aiOptions) return; // No options for this column (e.g., translation)
+    
+    const hasDropdown = validation[col]?.type === 'list';
+    
+    if (hasDropdown) {
+      // Column has dropdown → HARD constraint (must match exactly)
+      const dropdownValues = validation[col].values.join(', ');
+      let prompt = plan.columnPrompts[col];
+      
+      // Clean up existing instructions
+      prompt = prompt.replace(/\n\nFormat the result as:.*$/s, '');
+      prompt = prompt.replace(/\n\nReturn the result in this format:.*$/s, '');
+      prompt = prompt.replace(/\n\nIMPORTANT: Output MUST be.*$/s, '');
+      prompt = prompt.replace(/\n\nPreferred output:.*$/s, '');
+      
+      // Use actual dropdown values for HARD constraint
+      const hardConstraint = `\n\nIMPORTANT: Output MUST be exactly one of: ${dropdownValues}\nDo NOT output anything else - just one of those exact values.`;
+      prompt += hardConstraint;
+      
+      plan.columnPrompts[col] = prompt;
+      console.log(`  ${col}: HARD constraint (dropdown) → [${dropdownValues}]`);
+    } else {
+      // No dropdown → let AI provide nuanced answers (AI suggestion was just a hint)
+      console.log(`  ${col}: Free-form (AI suggested "${aiOptions}" but no dropdown - letting AI be smart)`);
+    }
+  });
+}
+
+/**
+ * Build an intelligent prompt that lets AI infer the task from headers
+ * Now includes data validation constraints when available
+ */
+function buildIntelligentPrompt(sourceHeader, targetHeader, validation) {
+  let rules = `- Output ONLY the actual result content
+- Do NOT add confirmation words like "Yes", "Done", "Completed", etc.
+- Do NOT add separators like "|||", ";", or explanations after the result
+- Be concise and cell-friendly
+- Match the expected format implied by the column name`;
+  
+  if (validation) {
+    if (validation.type === 'list' && validation.values && validation.values.length > 0) {
+      const validOptions = validation.values.join(', ');
+      // SOFT constraint - prefer options but allow flexibility
+      // This ensures data is always written even if AI doesn't match exactly
+      rules = `- Preferred output: one of [${validOptions}]
+- If content clearly fits one option, use that exact value
+- If none fit perfectly, use the closest match or a brief appropriate label
+- Keep output concise (1-3 words max)`;
+      console.log('📋 Adding soft validation hint to prompt:', validOptions);
+    } else if (validation.type === 'number') {
+      rules += `\n- Output should be a number if possible`;
+      if (validation.min !== undefined) rules += ` (preferred minimum: ${validation.min})`;
+      if (validation.max !== undefined) rules += ` (preferred maximum: ${validation.max})`;
+    } else if (validation.type === 'date') {
+      rules += `\n- Output should be a valid date if possible`;
+    }
+  }
+  
+  return `Given "${sourceHeader}": {{input}}
+
+Generate "${targetHeader}".
+
+IMPORTANT: Return ONLY the result. No confirmations, no "Yes/Done", no separators.
+
+Rules:
+${rules}`;
+}
+
+/**
+ * Build a prompt using custom instructions from the prompt row
+ * This is used when the user has defined instructions above the headers
+ * 
+ * @param {string} sourceHeader - Header name(s) of source column(s)
+ * @param {string} targetHeader - Header name of target column
+ * @param {string} customInstruction - Custom prompt from prompt row
+ * @param {boolean} hasMultipleInputs - Whether there are multiple input columns
+ * @param {Object} inputColumnHeaders - Map of column letter to header name
+ */
+function buildCustomPrompt(sourceHeader, targetHeader, customInstruction, hasMultipleInputs = false, inputColumnHeaders = {}) {
+  // The custom instruction already contains what to do, so we just need to wrap it
+  // with the input placeholder and basic formatting rules
+  
+  // Check if the instruction already mentions input/source
+  const mentionsInput = customInstruction.toLowerCase().includes('input') || 
+                        customInstruction.toLowerCase().includes('product') ||
+                        customInstruction.toLowerCase().includes('given') ||
+                        customInstruction.toLowerCase().includes('based on');
+  
+  let prompt;
+  
+  if (hasMultipleInputs && Object.keys(inputColumnHeaders).length > 1) {
+    // MULTI-COLUMN INPUT: The backend will pass structured data like:
+    // "Spare parts: LED headlights\nCar Brand: Audi\nCar Model: Q7"
+    // So we use {{input}} which will be replaced with this structured data
+    
+    const columnNames = Object.values(inputColumnHeaders).join(', ');
+    
+    if (mentionsInput) {
+      prompt = `${customInstruction}
+
+INPUT DATA (${columnNames}):
+{{input}}
+
+IMPORTANT: Return ONLY the result. No confirmations, no explanations.`;
+    } else {
+      prompt = `Given the following data (${columnNames}):
+{{input}}
+
+Task: ${customInstruction}
+
+IMPORTANT: Return ONLY the result. No confirmations, no explanations.`;
+    }
+  } else {
+    // SINGLE COLUMN INPUT: Original behavior
+    if (mentionsInput) {
+      // Instruction already explains the input context
+      prompt = `${customInstruction}
+
+Input ("${sourceHeader}"): {{input}}
+
+IMPORTANT: Return ONLY the result. No confirmations, no explanations.`;
+    } else {
+      // Add input context
+      prompt = `Given "${sourceHeader}": {{input}}
+
+Task: ${customInstruction}
+
+IMPORTANT: Return ONLY the result. No confirmations, no explanations.`;
+    }
+  }
+  
+  return prompt;
+}
+
+/**
+ * Parse command using backend AI
+ */
+function parseCommandWithBackend(input) {
+  const context = currentSelectionContext || {};
+  const enrichedContext = buildEnrichedContext(context, input);
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      handleAIParseResult(result, input, context);
+    })
+    .withFailureHandler(function(err) {
+      showSmartErrorMessage(input, context, err.message);
+    })
+    .parseCommandWithAI(input, enrichedContext);
+}
+
+/**
+ * Build enriched context for AI parsing
+ */
+function buildEnrichedContext(context, command) {
+  const enriched = { ...context };
+  
+  const selectedModel = document.getElementById('agentModelSelect')?.value || 'GEMINI';
+  enriched.provider = selectedModel;
+  
+  let description = '';
+  
+  // Check if this is explicit user selection vs auto-detected
+  const isExplicit = context.selectionInfo?.isExplicit || context.selectionInfo?.selectionSource === 'explicit';
+  const isAuto = context.selectionInfo?.selectionSource === 'auto' || context.selectionInfo?.isAutoDetected;
+  
+  if (isAuto) {
+    description += '## AUTO-DETECTED DATA REGION\n';
+    description += `The user clicked a single cell. I auto-detected the data table around it:\n`;
+  } else if (context.selectionInfo) {
+    description += '## USER EXPLICIT SELECTION\n';
+    description += `The user EXPLICITLY selected this range - respect their selection:\n`;
+    description += `The user has selected: ${context.selectedRange}\n`;
+  }
+  
+  if (context.selectionInfo?.columnsWithData?.length > 0) {
+    description += `\nColumns with data: ${context.selectionInfo.columnsWithData.join(', ')}\n`;
+    
+    const dataStartRow = context.selectionInfo.dataStartRow;
+    const dataEndRow = context.selectionInfo.dataEndRow;
+    const dataRowCount = context.selectionInfo.dataRowCount || context.selectionInfo.numRows;
+    
+    context.selectionInfo.columnsWithData.forEach(col => {
+      const header = context.headerRow?.[col];
+      if (header || dataStartRow) {
+        description += `  - Column ${col}: "${header || 'no header'}"`;
+        if (dataStartRow && dataEndRow) {
+          const range = `${col}${dataStartRow}:${col}${dataEndRow}`;
+          description += ` (${dataRowCount} rows, range ${range})`;
+        }
+        description += '\n';
+      }
+    });
+  }
+  
+  if (context.selectionInfo?.emptyColumns?.length > 0) {
+    description += `\nEmpty columns (potential outputs):\n`;
+    context.selectionInfo.emptyColumns.forEach(col => {
+      // Use prompt if available (detected from prompt row), otherwise use header
+      const displayName = col.prompt || col.header || 'no header';
+      // Truncate long prompts for readability in context
+      const truncated = displayName.length > 200 ? displayName.substring(0, 200) + '...' : displayName;
+      description += `  - Column ${col.column}: "${truncated}"`;
+      // Add row info if this has a custom prompt
+      if (col.prompt) {
+        description += ` [HAS CUSTOM PROMPT]`;
+      }
+      description += '\n';
+    });
+  } else if (context.selectionInfo?.columnsWithData?.length > 0) {
+    const lastDataCol = context.selectionInfo.columnsWithData[context.selectionInfo.columnsWithData.length - 1];
+    const nextCol = String.fromCharCode(lastDataCol.charCodeAt(0) + 1);
+    description += `\nNo empty columns detected. Suggested output column: ${nextCol}\n`;
+  }
+  
+  if (context.sampleData) {
+    description += `\nSample data:\n`;
+    Object.entries(context.sampleData).forEach(([col, samples]) => {
+      if (samples && samples.length > 0) {
+        description += `  Column ${col}: ${JSON.stringify(samples.slice(0, 2))}\n`;
+      }
+    });
+  }
+  
+  description += `\n## INSTRUCTIONS FOR AI\n`;
+  
+  if (isExplicit) {
+    description += `**IMPORTANT: User explicitly selected this range. Use their selection as-is.**\n`;
+    description += `- Use the EXACT columns the user selected as input (${context.selectionInfo?.columnsWithData?.join(', ') || 'all'})\n`;
+    description += `- For multi-column selection, include ALL selected data columns in input range\n`;
+  } else {
+    description += `User didn't select a specific range. Use smart defaults:\n`;
+    description += `- For tasks requiring MULTIPLE fields (classify, score, analyze), use ALL data columns as input range\n`;
+    description += `- For single-field tasks (translate, summarize, extract), use first data column as INPUT\n`;
+  }
+  description += `- Use the next available empty column as OUTPUT\n`;
+  description += `- Create a prompt that combines {{input}} with context needed for the task\n`;
+  description += `- For classification: include ALL relevant columns in the input range so each row has full context\n`;
+  
+  enriched.contextDescription = description;
+  
+  console.log('📤 Enriched context for AI:', description);
+  
+  return enriched;
+}
+
+/**
+ * Show smart error message with context-aware suggestions
+ */
+function showSmartErrorMessage(input, context, errorMsg) {
+  // Log error event
+  if (typeof logErrorEvent === 'function') {
+    logErrorEvent('parse_error', errorMsg);
+  }
+  
+  const columnDataRanges = context.columnDataRanges || {};
+  const columnsWithData = Object.keys(columnDataRanges).filter(c => columnDataRanges[c].hasData);
+  
+  if (columnsWithData.length === 0) {
+    addAgentMessage('error', "I don't see any data in your sheet. Please add some data first!");
+    return;
+  }
+  
+  const firstCol = columnsWithData[0];
+  const nextCol = String.fromCharCode(firstCol.charCodeAt(0) + 1);
+  
+  addAgentMessage('clarification', {
+    question: "I couldn't understand that command. Try being more specific:",
+    suggestions: [
+      `Translate column ${firstCol} to Spanish in ${nextCol}`,
+      `Summarize column ${firstCol} to ${nextCol}`,
+      `Extract emails from column ${firstCol} to ${nextCol}`
+    ]
+  });
+}
+
+/**
+ * Handle the result from AI parsing
+ */
+function handleAIParseResult(result, originalInput, context) {
+  console.log('🤖 Parse result:', JSON.stringify(result, null, 2));
+  
+  if (result._debug) {
+    console.error('⚠️ Backend debug info:', result._debug);
+  }
+  
+  if (result._meta) {
+    console.log('📋 Recommendation:', result._meta.recommendation, '-', result._meta.reason);
+  }
+  
+  // GUARANTEED FORMULA PATH
+  if (result.useFormula && result.formula) {
+    console.log('🧮 Guaranteed formula detected! Showing formula as primary...');
+    showFormulaOption(result, originalInput, context);
+    return;
+  }
+  
+  // CONDITIONAL FORMULA
+  if (result._formulaOption) {
+    console.log('⚠️ Conditional formula available, AI is default');
+  }
+  
+  if (result.success && result.plan) {
+    const plan = result.plan;
+    const selectedModel = document.getElementById('agentModelSelect')?.value || 'GEMINI';
+    plan.model = selectedModel;
+    plan.originalCommand = originalInput;
+    
+    // Resolve input range from context
+    if (plan.inputRange && context) {
+      // Check if AI specified a multi-column range (e.g., A6:C11)
+      const multiColMatch = plan.inputRange.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+      const singleColMatch = plan.inputRange.match(/^([A-Z]+)\d+/i);
+      
+      const selInfo = context.selectionInfo;
+      
+      if (multiColMatch) {
+        const startCol = multiColMatch[1].toUpperCase();
+        const endCol = multiColMatch[3].toUpperCase();
+        const isMultiColumn = startCol !== endCol;
+        
+        if (isMultiColumn) {
+          // PRESERVE multi-column range, only adjust rows
+          console.log('📊 AI requested multi-column input range:', plan.inputRange);
+          
+          // Track input columns for multi-column processing
+          plan.inputColumns = [];
+          for (let col = startCol.charCodeAt(0); col <= endCol.charCodeAt(0); col++) {
+            plan.inputColumns.push(String.fromCharCode(col));
+          }
+          plan.inputColumn = startCol; // Primary column for backwards compatibility
+          plan.hasMultipleInputColumns = true;
+          
+          // Build header map for the input columns
+          plan.inputColumnHeaders = {};
+          if (selInfo?.headers) {
+            plan.inputColumns.forEach(col => {
+              const header = selInfo.headers.find(h => h.column === col);
+              plan.inputColumnHeaders[col] = header?.name || col;
+            });
+          }
+          
+          // Adjust rows based on header detection
+          if (selInfo?.dataStartRow && selInfo?.dataEndRow) {
+            plan.inputRange = `${startCol}${selInfo.dataStartRow}:${endCol}${selInfo.dataEndRow}`;
+            plan.rowCount = selInfo.dataRowCount || (selInfo.dataEndRow - selInfo.dataStartRow + 1);
+            plan.dataStartRow = selInfo.dataStartRow;
+            plan.dataEndRow = selInfo.dataEndRow;
+            console.log('📊 Resolved multi-column range:', plan.inputRange, 'columns:', plan.inputColumns.join(','), 'rows:', plan.rowCount);
+          } else {
+            // Keep AI's original range
+            plan.rowCount = parseInt(multiColMatch[4]) - parseInt(multiColMatch[2]) + 1;
+            console.log('📊 Using AI multi-column range as-is:', plan.inputRange, 'rows:', plan.rowCount);
+          }
+        } else {
+          // Single column range (A6:A11) - use original logic
+          plan.inputColumn = startCol;
+          if (selInfo?.dataStartRow && selInfo?.dataEndRow) {
+            plan.inputRange = `${plan.inputColumn}${selInfo.dataStartRow}:${plan.inputColumn}${selInfo.dataEndRow}`;
+            plan.rowCount = selInfo.dataRowCount || (selInfo.dataEndRow - selInfo.dataStartRow + 1);
+            console.log('📊 Resolved single-column range:', plan.inputRange, 'rows:', plan.rowCount);
+          }
+        }
+      } else if (singleColMatch) {
+        plan.inputColumn = singleColMatch[1].toUpperCase();
+        
+        if (selInfo?.dataStartRow && selInfo?.dataEndRow) {
+          plan.inputRange = `${plan.inputColumn}${selInfo.dataStartRow}:${plan.inputColumn}${selInfo.dataEndRow}`;
+          plan.rowCount = selInfo.dataRowCount || (selInfo.dataEndRow - selInfo.dataStartRow + 1);
+          console.log('📊 Resolved range from selectionInfo (header-excluded):', plan.inputRange, 'rows:', plan.rowCount);
+        } else {
+          const colData = context.columnDataRanges?.[plan.inputColumn];
+          if (colData && colData.hasData) {
+            plan.inputRange = colData.range;
+            plan.rowCount = colData.rowCount;
+            console.log('📊 Fallback to columnDataRanges:', plan.inputRange, 'rows:', plan.rowCount);
+          } else {
+            const rangeMatch = plan.inputRange.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/i);
+            if (rangeMatch) {
+              plan.rowCount = parseInt(rangeMatch[4]) - parseInt(rangeMatch[2]) + 1;
+            }
+          }
+        }
+      }
+    }
+    
+    // Ensure rowCount is set
+    if (!plan.rowCount && plan.inputRange) {
+      const rangeMatch = plan.inputRange.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/i);
+      if (rangeMatch) {
+        plan.rowCount = parseInt(rangeMatch[4]) - parseInt(rangeMatch[2]) + 1;
+      }
+    }
+    
+    // ============================================
+    // CRITICAL FIX: Expand single-column to multi-column for classification/scoring tasks
+    // ============================================
+    const classifyTasks = ['classify', 'score', 'categorize', 'evaluate', 'analyze', 'rate'];
+    const isClassifyTask = classifyTasks.includes(plan.taskType?.toLowerCase()) || 
+                           originalInput.toLowerCase().match(/classify|categorize|score|evaluate|based on/i);
+    
+    const selInfo = context?.selectionInfo;
+    const columnsWithData = selInfo?.columnsWithData || [];
+    
+    // If this is a classification task and we have a single-column input but multiple data columns exist
+    if (isClassifyTask && columnsWithData.length > 1 && plan.inputRange) {
+      const currentRangeMatch = plan.inputRange.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+      if (currentRangeMatch) {
+        const startCol = currentRangeMatch[1].toUpperCase();
+        const endCol = currentRangeMatch[3].toUpperCase();
+        
+        // Check if current range is single-column
+        if (startCol === endCol) {
+          // Expand to include all data columns
+          const firstDataCol = columnsWithData[0];
+          const lastDataCol = columnsWithData[columnsWithData.length - 1];
+          const startRow = currentRangeMatch[2];
+          const endRow = currentRangeMatch[4];
+          
+          const expandedRange = `${firstDataCol}${startRow}:${lastDataCol}${endRow}`;
+          console.log('🔄 AUTO-EXPANDING for classification: ' + plan.inputRange + ' → ' + expandedRange);
+          console.log('   Reason: Classification needs full row context (' + columnsWithData.join(', ') + ')');
+          
+          plan.inputRange = expandedRange;
+          plan.inputColumns = columnsWithData;
+          plan.isMultiColumnInput = true;
+          plan.hasMultipleInputColumns = true; // Flag for execution
+          
+          // Build inputColumnHeaders from selection info
+          plan.inputColumnHeaders = {};
+          columnsWithData.forEach(col => {
+            const header = selInfo?.headers?.find(h => h.column === col);
+            if (header && header.name) {
+              plan.inputColumnHeaders[col] = header.name;
+            }
+          });
+        }
+      }
+    }
+    
+    // MULTI-COLUMN EXPANSION
+    const emptyColumns = context?.selectionInfo?.emptyColumns || [];
+    const lower = originalInput.toLowerCase();
+    
+    const isGenericFill = isFillAllCommand(lower);
+    const hasSpecificOutput = isSingleColumnCommand(lower);
+    
+    // Get custom prompts from selection info (prompt row above headers)
+    const customPrompts = context?.selectionInfo?.columnPrompts || {};
+    if (Object.keys(customPrompts).length > 0) {
+      console.log('📋 Custom prompts available for expansion:', Object.keys(customPrompts));
+    }
+    
+    // CASE 1: Single output but multiple empty columns - expand to multi-column
+    if (plan.outputColumns?.length === 1 && emptyColumns.length > 1 && isGenericFill && !hasSpecificOutput) {
+      console.log('📊 Expanding AI plan to multi-column:', emptyColumns.map(c => c.column));
+      
+      const sourceHeader = context?.headerRow?.[plan.inputColumn] || 'Input';
+      const columnPrompts = {};
+      const expandedOutputColumns = [];
+      
+      emptyColumns.forEach(col => {
+        const targetHeader = col.header || `Column ${col.column}`;
+        const customPrompt = customPrompts[col.column] || col.customPrompt;
+        
+        if (customPrompt) {
+          columnPrompts[col.column] = buildCustomPrompt(sourceHeader, targetHeader, customPrompt);
+          console.log('  ✓ Using custom prompt for ' + col.column);
+        } else {
+          columnPrompts[col.column] = buildIntelligentPrompt(sourceHeader, targetHeader);
+        }
+        expandedOutputColumns.push(col.column);
+      });
+      
+      plan.outputColumns = expandedOutputColumns;
+      plan.columnPrompts = columnPrompts;
+      plan.isMultiColumn = true;
+      plan.summary = `Process ${plan.inputRange} → ${expandedOutputColumns.length} columns: ${expandedOutputColumns.join(', ')}`;
+      
+      console.log('📊 Expanded plan:', {
+        outputColumns: plan.outputColumns,
+        columnPrompts: Object.keys(plan.columnPrompts)
+      });
+    }
+    
+    // CASE 2: AI returned multiple outputColumns but with a SINGLE combined prompt
+    if (plan.outputColumns?.length > 1 && !plan.columnPrompts) {
+      console.log('⚠️ AI returned multi-column plan with single prompt - generating separate prompts');
+      
+      const sourceCol = plan.inputColumn || plan.inputRange?.match(/^([A-Z]+)/i)?.[1];
+      const sourceHeader = context?.selectionInfo?.headers?.find(h => h.column === sourceCol)?.name || 
+                          context?.headerRow?.[sourceCol] || 'Input';
+      const columnPrompts = {};
+      
+      plan.outputColumns.forEach(col => {
+        const colInfo = emptyColumns.find(c => c.column === col) || 
+                       context?.selectionInfo?.headers?.find(h => h.column === col);
+        const targetHeader = colInfo?.header || colInfo?.name || `Column ${col}`;
+        // Check for custom prompt: from customPrompts map, from detected prompt row, or legacy customPrompt field
+        const customPrompt = customPrompts[col] || colInfo?.prompt || colInfo?.customPrompt;
+        
+        if (customPrompt) {
+          columnPrompts[col] = buildCustomPrompt(sourceHeader, targetHeader, customPrompt);
+          console.log(`  ${col}: ✓ Using custom prompt (from prompt row or user input)`);
+        } else {
+          columnPrompts[col] = buildIntelligentPrompt(sourceHeader, targetHeader);
+          console.log(`  ${col}: "${targetHeader}" prompt generated (auto)`);
+        }
+      });
+      
+      plan.columnPrompts = columnPrompts;
+      plan.isMultiColumn = true;
+      
+      console.log('📊 Generated separate column prompts:', Object.keys(plan.columnPrompts));
+    }
+    
+    if (result._optimization) {
+      plan._optimization = result._optimization;
+    }
+    
+    if (result._formulaOption) {
+      plan._formulaOption = result._formulaOption;
+      console.log('📋 Formula option available (conditional):', result._formulaOption.warning);
+    }
+    
+    console.log('📋 Final plan:', plan);
+    
+    fetchCostEstimate(plan, function(estimate) {
+      plan.estimate = estimate;
+      currentPlan = plan;
+      addAgentMessage('plan', plan);
+      // Trigger format update if auto-populated
+      if (currentPlan.formatHint) {
+        setTimeout(function() { updatePlanFormat(currentPlan.formatHint); }, 50);
+      }
+    });
+  } else if (result.clarification) {
+    addAgentMessage('clarification', result.clarification);
+  } else {
+    if (context) {
+      showSmartErrorMessage(originalInput, context, result.error);
+    } else {
+      addAgentMessage('error', result.error || 'Could not understand command');
+    }
+  }
+}
+
+/**
+ * Fetch AI-driven classification options for columns
+ * Calls backend API to analyze column headers and suggest appropriate options
+ */
+function fetchClassificationOptions(columnHeaders, callback) {
+  google.script.run
+    .withSuccessHandler(function(response) {
+      if (response && response.success) {
+        callback(response.columnOptions);
+      } else {
+        console.error('Failed to fetch classification options:', response);
+        callback(null);
+      }
+    })
+    .withFailureHandler(function(err) {
+      console.error('Error fetching classification options:', err);
+      callback(null);
+    })
+    .fetchClassificationOptions(columnHeaders);
+}
+
+/**
+ * Fetch cost estimate for a plan
+ */
+function fetchCostEstimate(plan, callback) {
+  google.script.run
+    .withSuccessHandler(function(estimate) {
+      callback(estimate);
+    })
+    .withFailureHandler(function(err) {
+      callback(null);
+    })
+    .estimateAgentCost(plan.rowCount, plan.taskType?.toLowerCase(), plan.model, null);
+}
+
+/**
+ * Smart local parsing with context awareness
+ */
+function parseCommandLocally(input, context) {
+  const lower = input.toLowerCase();
+  context = context || {};
+  const columnDataRanges = context.columnDataRanges || {};
+  const headerRow = context.headerRow || {};
+  
+  console.log('Parsing command:', input);
+  console.log('Context headers:', headerRow);
+  
+  // Step 0a: Check for COLUMN RANGE patterns FIRST (these are INPUT ranges, not output)
+  // E.g., "from columns G to I", "columns G-I", "columns G through I"
+  let columnRangeInput = null;  // Will hold array of columns if range detected
+  
+  const columnRangeMatch = input.match(/(?:from\s+)?columns?\s+([A-Z])\s*(?:to|through|-)\s*([A-Z])(?:\s|$)/i);
+  if (columnRangeMatch) {
+    const startCol = columnRangeMatch[1].toUpperCase();
+    const endCol = columnRangeMatch[2].toUpperCase();
+    const startCode = startCol.charCodeAt(0);
+    const endCode = endCol.charCodeAt(0);
+    
+    if (endCode >= startCode) {
+      columnRangeInput = [];
+      for (let code = startCode; code <= endCode; code++) {
+        columnRangeInput.push(String.fromCharCode(code));
+      }
+      console.log('📊 Found column RANGE input pattern:', startCol, 'to', endCol, '→', columnRangeInput.join(', '));
+    }
+  }
+  
+  // Step 0b: Check for OUTPUT column patterns
+  // These patterns indicate where to WRITE results, not where to READ from
+  let explicitOutputCol = null;
+  
+  // Pattern 1: "fill in X on/in column Y", "put in column Y", "write to column Y"
+  const fillInMatch = input.match(/(?:fill\s+(?:in\s+)?|put\s+(?:in\s+)?|write\s+(?:to\s+)?|populate\s*)(?:\w+\s+)?(?:on|in|to|into)\s+(?:column\s+)?([A-Z])(?:\s|$)/i);
+  if (fillInMatch) {
+    explicitOutputCol = fillInMatch[1].toUpperCase();
+    console.log('Found explicit OUTPUT from "fill in" pattern:', explicitOutputCol);
+  }
+  
+  // Pattern 2: "...in column X" at the END of command (after categories or task description)
+  // E.g., "categorize into hot, warm, cold in column E" → E is output
+  // BUT NOT when "to X" is part of a column range like "from G to I"
+  if (!explicitOutputCol && !columnRangeInput) {
+    const endColumnMatch = input.match(/(?:in|to|into)\s+(?:column\s+)?([A-Z])(?:\s*$|\s+column)/i);
+    if (endColumnMatch) {
+      explicitOutputCol = endColumnMatch[1].toUpperCase();
+      console.log('Found explicit OUTPUT from end pattern:', explicitOutputCol);
+    }
+  }
+  
+  // Pattern 3: "results in/to column X", "output to column X"
+  if (!explicitOutputCol) {
+    const resultsMatch = input.match(/(?:results?|output)\s+(?:in|to)\s+(?:column\s+)?([A-Z])(?:\s|$)/i);
+    if (resultsMatch) {
+      explicitOutputCol = resultsMatch[1].toUpperCase();
+      console.log('Found explicit OUTPUT from "results to" pattern:', explicitOutputCol);
+    }
+  }
+  
+  // Step 0: Check if AI already analyzed this command and provided column hints
+  if (window._aiColumnHint) {
+    console.log('🤖 [AI Hint] Using AI-determined columns:', window._aiColumnHint);
+    
+    // Use AI's column determination directly
+    const aiHint = window._aiColumnHint;
+    delete window._aiColumnHint; // Clear after use
+    
+    // Build the plan from AI's analysis
+    const inputColumns = aiHint.inputColumns || [];
+    const outputColumn = aiHint.outputColumn || null;
+    const inputRange = aiHint.inputRange || null;
+    
+    if (inputColumns.length > 0 && outputColumn) {
+      console.log('🤖 [AI Hint] Building plan from AI analysis');
+      console.log('🤖 [AI Hint] Input columns:', inputColumns.join(', '));
+      console.log('🤖 [AI Hint] Output column:', outputColumn);
+      console.log('🤖 [AI Hint] Input range:', inputRange);
+      
+      // Build headers map
+      const inputColumnHeaders = {};
+      inputColumns.forEach(col => {
+        const header = context.selectionInfo?.headers?.find(h => h.column === col)?.name || 
+                      context.headerRow?.[col] || 
+                      `Column ${col}`;
+        inputColumnHeaders[col] = header;
+      });
+      
+      // Create plan with AI's column determination
+      const plan = {
+        originalCommand: input,
+        inputRange: inputRange,
+        inputColumn: inputColumns[0],
+        inputColumns: inputColumns,
+        inputColumnHeaders: inputColumnHeaders,
+        hasMultipleInputColumns: inputColumns.length > 1,
+        outputColumns: [outputColumn],
+        rowCount: context.selectionInfo?.dataRowCount || 0,
+        prompt: input
+      };
+      
+      console.log('🤖 [AI Hint] Created plan:', plan);
+      showPlan(plan, input);
+      return;
+    }
+  }
+  
+  // Step 1: Extract input column(s) (fallback to pattern matching)
+  let inputRange = null;
+  let inputColumn = null;
+  
+  const rangeMatch = input.match(/([A-Z]+\d+:[A-Z]+\d+)/i);
+  if (rangeMatch) {
+    inputRange = rangeMatch[1].toUpperCase();
+    inputColumn = inputRange.match(/^([A-Z]+)/i)[1];
+    console.log('Found explicit range:', inputRange, 'column:', inputColumn);
+  } else {
+    // Don't match "column X" if X is already identified as output
+    const colMatch = input.match(/(?:from\s+)?(?:column|col\.?)\s+([A-Z])(?:\s|$|,|to)/i);
+    if (colMatch) {
+      const matchedCol = colMatch[1].toUpperCase();
+      // Only use as input if it's NOT the explicit output column
+      if (matchedCol !== explicitOutputCol) {
+        inputColumn = matchedCol;
+        console.log('Found input column:', inputColumn);
+        if (columnDataRanges[inputColumn]) {
+          inputRange = columnDataRanges[inputColumn].range;
+          console.log('Auto-detected range:', inputRange);
+        }
+      }
+    }
+    
+    if (!inputColumn && lower.includes('translate')) {
+      const translateColMatch = input.match(/translate\s+(?:the\s+)?(?:data\s+)?(?:in\s+)?(?:column\s+)?([A-Z])(?:\s|$)/i);
+      if (translateColMatch) {
+        inputColumn = translateColMatch[1].toUpperCase();
+        if (columnDataRanges[inputColumn]) {
+          inputRange = columnDataRanges[inputColumn].range;
+        }
+      }
+    }
+  }
+  
+  // Step 1b: Use selection context for MULTI-COLUMN input
+  // When user says "use current data", we should use ALL data columns, not just one
+  let inputColumns = [];  // Array of all input columns
+  let inputColumnHeaders = {};  // Map of column -> header name
+  
+  // If we detected an explicit column range (e.g., "columns G to I"), use it
+  if (columnRangeInput && columnRangeInput.length > 0) {
+    inputColumns = columnRangeInput;
+    inputColumn = columnRangeInput[0];
+    console.log('📊 Using explicit column range as input:', inputColumns.join(', '));
+    
+    // Build range if we have row info from context
+    if (context.selectionInfo?.dataStartRow && context.selectionInfo?.dataEndRow) {
+      const firstCol = columnRangeInput[0];
+      const lastCol = columnRangeInput[columnRangeInput.length - 1];
+      inputRange = `${firstCol}${context.selectionInfo.dataStartRow}:${lastCol}${context.selectionInfo.dataEndRow}`;
+      console.log('📊 Built input range from column range:', inputRange);
+    }
+    
+    // Set output to next empty column after the range
+    if (!explicitOutputCol && context.selectionInfo?.emptyColumns?.length > 0) {
+      const emptyColumns = context.selectionInfo.emptyColumns.map(c => typeof c === 'object' ? c.column : c);
+      explicitOutputCol = emptyColumns[0];
+      console.log('📊 Using first empty column after range as output:', explicitOutputCol);
+    }
+  }
+  
+  if (context.selectionInfo && inputColumns.length === 0) {
+    const columnsWithData = context.selectionInfo.columnsWithData || [];
+    const emptyColumns = (context.selectionInfo.emptyColumns || []).map(c => typeof c === 'object' ? c.column : c);
+    const selInfo = context.selectionInfo;
+    
+    console.log('Selection context - data columns:', columnsWithData, 'empty columns:', emptyColumns);
+    
+    // If explicit output wasn't found but we have empty columns in selection, use first empty as output
+    if (!explicitOutputCol && emptyColumns.length > 0) {
+      explicitOutputCol = emptyColumns[0];
+      console.log('Using first empty column from selection as output:', explicitOutputCol);
+    }
+    
+    // Check if user wants ALL data (phrases like "use current data", "use the data", "based on data")
+    const wantsAllData = lower.includes('current data') || 
+                         lower.includes('use the data') || 
+                         lower.includes('use data') ||
+                         lower.includes('based on') ||
+                         (lower.includes('categorize') && !inputColumn);
+    
+    // Filter valid input columns (exclude output and empty columns)
+    const validInputCols = columnsWithData.filter(c => c !== explicitOutputCol && !emptyColumns.includes(c));
+    
+    if (validInputCols.length > 0) {
+      if (wantsAllData && validInputCols.length > 1) {
+        // MULTI-COLUMN INPUT: Use ALL data columns
+        inputColumns = validInputCols;
+        inputColumn = validInputCols[0];  // Primary column for range calculation
+        console.log('📊 MULTI-COLUMN INPUT: Using ALL data columns:', inputColumns.join(', '));
+        
+        // Build headers map for context
+        validInputCols.forEach(col => {
+          const header = selInfo.headers?.find(h => h.column === col)?.name || 
+                        context.headerRow?.[col] || 
+                        `Column ${col}`;
+          inputColumnHeaders[col] = header;
+        });
+        console.log('📊 Column headers:', JSON.stringify(inputColumnHeaders));
+        
+        // Build FULL range spanning all input columns
+        if (selInfo.dataStartRow && selInfo.dataEndRow) {
+          const firstCol = validInputCols[0];
+          const lastCol = validInputCols[validInputCols.length - 1];
+          inputRange = `${firstCol}${selInfo.dataStartRow}:${lastCol}${selInfo.dataEndRow}`;
+          console.log('📊 Built multi-column input range:', inputRange);
+        }
+      } else {
+        // Single column input - but ONLY use selection context if user didn't specify a column
+        if (!inputColumn) {
+          inputColumn = validInputCols[0];
+          console.log('Using single column for input (from selection):', inputColumn);
+        } else {
+          console.log('Keeping explicit input column from command:', inputColumn);
+        }
+        inputColumns = [inputColumn];
+        
+        if (selInfo.dataStartRow && selInfo.dataEndRow) {
+          inputRange = `${inputColumn}${selInfo.dataStartRow}:${inputColumn}${selInfo.dataEndRow}`;
+          console.log('Built input range from selection:', inputRange);
+        } else if (columnDataRanges[inputColumn]) {
+          inputRange = columnDataRanges[inputColumn].range;
+        }
+      }
+    }
+  }
+  
+  // Step 2: Extract output columns
+  let outputColumns = [];
+  
+  // If we found explicit output from "fill in" pattern, use it first
+  if (explicitOutputCol) {
+    outputColumns = [explicitOutputCol];
+    console.log('Using explicit output column from fill-in pattern:', outputColumns);
+  }
+  
+  // Only match "to column X" or "output to X" if not already found
+  if (outputColumns.length === 0) {
+    const outputPatterns = [
+      /(?:output\s+)?to\s+(?:columns?\s+)?([A-Z](?:\s*[,&]\s*[A-Z])*(?:\s+and\s+[A-Z])?)(?:\s|$)/i,
+      /results?\s+(?:to|in)\s+(?:columns?\s+)?([A-Z])(?:\s|$)/i,
+      /\b([A-Z]\s*,\s*[A-Z](?:\s*,\s*[A-Z])*)\s*$/i
+    ];
+    
+    for (const pattern of outputPatterns) {
+      const outputMatch = input.match(pattern);
+      if (outputMatch) {
+        const colStr = outputMatch[1];
+        const cols = colStr.split(/[,&\s]+(?:and\s+)?/)
+          .map(c => c.trim().toUpperCase())
+          .filter(c => c.length === 1 && /^[A-Z]$/.test(c));
+        
+        if (cols.length > 0) {
+          outputColumns = cols;
+          console.log('Detected output columns:', outputColumns);
+          break;
+        }
+      }
+    }
+  }
+  
+  // Use selection context: empty columns are likely output targets
+  if (outputColumns.length === 0 && context.selectionInfo?.emptyColumns?.length > 0) {
+    const emptyColumns = context.selectionInfo.emptyColumns;
+    const firstEmpty = emptyColumns[0];
+    const colLetter = typeof firstEmpty === 'object' ? firstEmpty.column : firstEmpty;
+    if (colLetter !== inputColumn) {
+      outputColumns = [colLetter];
+      console.log('Using empty column from selection as output:', outputColumns);
+    }
+  }
+  
+  // Fallback: find letters in command that aren't the input column
+  if (outputColumns.length === 0) {
+    const allCols = input.toUpperCase().match(/\b[C-Z]\b/g);
+    if (allCols && allCols.length > 0) {
+      outputColumns = [...new Set(allCols)].filter(c => c !== inputColumn);
+      console.log('Fallback output columns:', outputColumns);
+    }
+  }
+  
+  // CRITICAL: If output still equals input, use next empty column
+  if (outputColumns.length === 0 || (outputColumns.length === 1 && outputColumns[0] === inputColumn)) {
+    const emptyColumns = context.selectionInfo?.emptyColumns || [];
+    if (emptyColumns.length > 0) {
+      // emptyColumns is array of objects {column: 'E', header: '...'}
+      // Find first empty column that's not the input
+      const nextEmpty = emptyColumns.find(c => {
+        const col = typeof c === 'object' ? c.column : c;
+        return col !== inputColumn;
+      });
+      if (nextEmpty) {
+        // Extract column letter from object if needed
+        const colLetter = typeof nextEmpty === 'object' ? nextEmpty.column : nextEmpty;
+        outputColumns = [colLetter];
+        console.log('Using empty column as output:', outputColumns);
+      }
+    }
+    
+    // Ultimate fallback: next column after input
+    if (outputColumns.length === 0 && inputColumn) {
+      const nextCol = String.fromCharCode(inputColumn.charCodeAt(0) + 1);
+      outputColumns = [nextCol];
+      console.log('Using next column as output:', outputColumns);
+    }
+  }
+  
+  // Step 3: Detect task type
+  let taskType = 'custom';
+  let taskLabel = 'Process';
+  let prompt = '';
+  let languages = [];
+  let columnPrompts = {};
+  
+  if (lower.includes('translate')) {
+    taskType = 'translate';
+    taskLabel = 'Translate';
+    
+    const knownLanguages = [
+      'english', 'spanish', 'french', 'german', 'korean', 'japanese', 'chinese', 
+      'italian', 'portuguese', 'russian', 'arabic', 'hindi', 'vietnamese', 
+      'thai', 'indonesian', 'dutch', 'polish', 'turkish', 'swedish', 'danish',
+      'norwegian', 'finnish', 'greek', 'hebrew', 'czech', 'romanian', 'hungarian',
+      'malay', 'filipino', 'tagalog', 'bengali', 'punjabi', 'tamil', 'telugu',
+      'marathi', 'gujarati', 'kannada', 'malayalam', 'urdu', 'persian', 'farsi',
+      'ukrainian', 'serbian', 'croatian', 'slovak', 'slovenian', 'bulgarian',
+      'latvian', 'lithuanian', 'estonian', 'icelandic', 'catalan', 'basque',
+      'welsh', 'irish', 'scottish', 'afrikaans', 'swahili', 'zulu', 'xhosa'
+    ];
+    
+    const isKnownLanguage = (str) => {
+      if (!str || str.length <= 1) return false;
+      return knownLanguages.includes(str.toLowerCase().trim());
+    };
+    
+    const langPatterns = [
+      /translate.*?(?:to|into)\s+([\w]+(?:\s*[,&]\s*[\w]+)*(?:\s+and\s+[\w]+)?)\s+(?:in|to)\s+(?:columns?|[A-Z])/i,
+      /translate.*?(?:to|into)\s+([\w]+(?:\s*[,&]\s*[\w]+)*(?:\s+and\s+[\w]+)?)/i
+    ];
+    
+    for (const pattern of langPatterns) {
+      const langMatch = input.match(pattern);
+      if (langMatch) {
+        const langStr = langMatch[1];
+        const potentialLangs = langStr.split(/[,&\s]+(?:and\s+)?/)
+          .map(l => l.trim())
+          .filter(l => {
+            if (l.length <= 1) return false;
+            if (['column', 'columns', 'in', 'to', 'from'].includes(l.toLowerCase())) return false;
+            return true;
+          });
+        
+        const validLangs = potentialLangs.filter(l => isKnownLanguage(l));
+        
+        if (validLangs.length > 0) {
+          languages = validLangs;
+          break;
+        }
+      }
+    }
+    
+    // Check headers for languages
+    console.log('Checking headers for languages. Output cols:', outputColumns, 'Headers:', headerRow);
+    if (languages.length === 0 && outputColumns.length > 0) {
+      const headerLanguages = [];
+      for (const col of outputColumns) {
+        const header = headerRow[col];
+        if (header && isKnownLanguage(header)) {
+          headerLanguages.push({ column: col, language: header });
+        }
+      }
+      
+      if (headerLanguages.length > 0) {
+        console.log('✓ Detected languages from headers:', headerLanguages);
+        languages = headerLanguages.map(h => h.language);
+        headerLanguages.forEach(({ column, language }) => {
+          columnPrompts[column] = `Translate to ${language}. Keep brand names and proper nouns unchanged. Return only the translation:\n\n{{input}}`;
+        });
+        outputColumns = headerLanguages.map(h => h.column);
+      } else {
+        console.log('No language headers found for columns:', outputColumns);
+      }
+    }
+    
+    if (languages.length === 0 && outputColumns.length > 0) {
+      return null;
+    }
+    
+    if (languages.length === 0) languages = ['English'];
+    
+    if (languages.length > 0 && outputColumns.length === 0 && inputColumn) {
+      const startCol = inputColumn.charCodeAt(0) + 1;
+      outputColumns = languages.map((_, i) => String.fromCharCode(startCol + i));
+    }
+    
+    if (languages.length >= 1 && Object.keys(columnPrompts).length === 0) {
+      if (outputColumns.length <= languages.length) {
+        outputColumns.forEach((col, i) => {
+          const lang = languages[i] || languages[0];
+          columnPrompts[col] = `Translate to ${lang}. Keep brand names and proper nouns unchanged. Return only the translation:\n\n{{input}}`;
+        });
+      } else if (languages.length > 1) {
+        languages.forEach((lang, i) => {
+          if (outputColumns[i]) {
+            columnPrompts[outputColumns[i]] = `Translate to ${lang}. Keep brand names and proper nouns unchanged. Return only the translation:\n\n{{input}}`;
+          }
+        });
+        outputColumns = outputColumns.slice(0, languages.length);
+      }
+    }
+    
+    prompt = `Translate to ${languages[0]}. Keep brand names unchanged:\n\n{{input}}`;
+    
+  } else if (lower.includes('summarize') || lower.includes('summary')) {
+    taskType = 'summarize';
+    taskLabel = 'Summarize';
+    prompt = 'Summarize in 1-2 sentences:\n\n{{input}}';
+    
+  } else if (lower.includes('extract')) {
+    taskType = 'extract';
+    taskLabel = 'Extract';
+    if (lower.includes('email')) {
+      prompt = 'Extract email addresses. Return only the emails, comma-separated if multiple:\n\n{{input}}';
+    } else if (lower.includes('phone')) {
+      prompt = 'Extract phone numbers. Return only the numbers:\n\n{{input}}';
+    } else if (lower.includes('name')) {
+      prompt = 'Extract person names. Return only the names:\n\n{{input}}';
+    } else if (lower.includes('url') || lower.includes('link')) {
+      prompt = 'Extract URLs/links. Return only the URLs:\n\n{{input}}';
+    } else {
+      prompt = 'Extract the key information:\n\n{{input}}';
+    }
+    
+  } else if (lower.includes('classify') || lower.includes('categorize')) {
+    taskType = 'classify';
+    taskLabel = 'Classify';
+    
+    // Use original input (not lowercased) for category extraction to preserve case
+    let categories = null;
+    
+    // Pattern 1: Quoted categories - 'Small', 'Medium', 'Large' or "Small", "Medium", "Large"
+    const quotedMatch = input.match(/(?:into|as|to)\s+(['"][^'"]+['"](?:\s*,\s*['"][^'"]+['"])+)/i);
+    if (quotedMatch) {
+      // Extract values from quotes
+      const quoted = quotedMatch[1].match(/['"]([^'"]+)['"]/g);
+      if (quoted) {
+        categories = quoted.map(q => q.replace(/['"]/g, '')).join('/');
+      }
+    }
+    
+    // Pattern 2: "categorized to hot, warm, cold" or "categorize into X, Y, Z"
+    if (!categories) {
+      const categorizedToMatch = input.match(/categori[sz]e[d]?\s+(?:to|into)\s+([\w\/,\s]+?)(?:\s+and\s+put|\s+in\s+column|\s+to\s+column|\s*$)/i);
+      if (categorizedToMatch) {
+        categories = categorizedToMatch[1].trim();
+        console.log('Found categories from "categorized to" pattern:', categories);
+      }
+    }
+    
+    // Pattern 3: "as Hot, Warm, Cold" or "as Hot/Warm/Cold"
+    if (!categories) {
+      const asMatch = lower.match(/\bas\s+([\w\/,\s]+?)(?:\s+in|\s+to|\s+based|\s*$)/);
+      if (asMatch) categories = asMatch[1].trim();
+    }
+    
+    // Pattern 4: "into Small, Medium, Large" (unquoted)
+    if (!categories) {
+      const intoMatch = lower.match(/into\s+([\w\/,\s]+?)(?:\s+based|\s+in|\s+to|\s*$)/);
+      if (intoMatch) categories = intoMatch[1].trim();
+    }
+    
+    // Pattern 5: "(e.g., Small, Medium, Large)" or "(Small, Medium, Large)"
+    if (!categories) {
+      const parenMatch = input.match(/\((?:e\.?g\.?,?\s*)?([\w,\s\/]+)\)/);
+      if (parenMatch) categories = parenMatch[1].trim();
+    }
+    
+    // Pattern 6: "categories: Small, Medium, Large"
+    if (!categories) {
+      const catMatch = lower.match(/categor(?:ies|y)[:\s]+([\w\/,\s]+?)(?:\s+in|\s+to|\s*$)/);
+      if (catMatch) categories = catMatch[1].trim();
+    }
+    
+    // Default fallback
+    if (!categories) categories = 'Positive/Negative/Neutral';
+    
+    // Clean up categories (remove trailing words like "and put", "column", etc.)
+    categories = categories.replace(/\s+(in|to|based|from|output|column|and|put).*$/i, '').trim();
+    
+    // Normalize: convert "hot, warm, cold" to "Hot/Warm/Cold"
+    if (categories.includes(',')) {
+      categories = categories.split(/\s*,\s*/).map(c => c.trim()).filter(c => c).join('/');
+    }
+    
+    // Capitalize first letter of each category
+    categories = categories.split('/').map(c => c.charAt(0).toUpperCase() + c.slice(1).toLowerCase()).join('/');
+    
+    console.log('📋 Extracted categories:', categories);
+    
+    prompt = `Classify as exactly one of: ${categories}\n\nText: {{input}}\n\nRespond with only the category, nothing else:`;
+    
+  } else if (lower.includes('generate')) {
+    taskType = 'generate';
+    taskLabel = 'Generate';
+    prompt = 'Generate content based on:\n\n{{input}}';
+    
+  } else if (lower.includes('clean') || lower.includes('fix')) {
+    taskType = 'clean';
+    taskLabel = 'Clean';
+    prompt = 'Clean and standardize this text. Fix typos and formatting:\n\n{{input}}';
+  } else {
+    return null;
+  }
+  
+  // Can't parse if we don't have an input range
+  if (!inputRange) {
+    if (inputColumn && !columnDataRanges[inputColumn]) {
+      return null;
+    }
+    return null;
+  }
+  
+  // Calculate row count from range
+  const rowMatch = inputRange.match(/(\d+):.*?(\d+)/);
+  const rowCount = rowMatch ? parseInt(rowMatch[2]) - parseInt(rowMatch[1]) + 1 : 0;
+  
+  // Default output column if not specified
+  if (outputColumns.length === 0 && inputColumn) {
+    outputColumns = [String.fromCharCode(inputColumn.charCodeAt(0) + 1)];
+  }
+  
+  // Filter out input column from output columns
+  outputColumns = outputColumns.filter(c => c !== inputColumn);
+  if (outputColumns.length === 0 && inputColumn) {
+    outputColumns = [String.fromCharCode(inputColumn.charCodeAt(0) + 1)];
+  }
+  
+  const modelMap = {
+    translate: 'GEMINI',
+    summarize: 'GEMINI', 
+    extract: 'GROQ',
+    classify: 'GROQ',
+    generate: 'CHATGPT',
+    clean: 'GROQ'
+  };
+  
+  // Build summary message
+  let summary = `I'll ${taskLabel.toLowerCase()} the data in ${inputRange}`;
+  
+  if (taskType === 'translate' && languages.length >= 1) {
+    if (languages.length === outputColumns.length) {
+      const mapping = languages.map((lang, i) => `${lang} → ${outputColumns[i]}`).join(', ');
+      summary += ` (${mapping})`;
+    } else {
+      summary += ` to ${languages.join(', ')}`;
+    }
+  } else if (Object.keys(columnPrompts).length > 0 && taskType === 'custom') {
+    summary = `I'll process ${inputRange} using your column headers as prompts`;
+    const promptPreview = outputColumns.map(col => {
+      const prompt = headerRow[col];
+      if (prompt) {
+        const short = prompt.length > 25 ? prompt.substring(0, 25) + '...' : prompt;
+        return `${col}: "${short}"`;
+      }
+      return col;
+    }).join(', ');
+    summary += ` (${promptPreview})`;
+  }
+  
+  summary += ` and write results to column${outputColumns.length > 1 ? 's' : ''} ${outputColumns.join(', ')}.`;
+  
+  // Build enhanced prompt for multi-column input
+  let enhancedPrompt = prompt;
+  const isMultiColumn = inputColumns.length > 1;
+  
+  if (isMultiColumn && Object.keys(inputColumnHeaders).length > 0) {
+    // For multi-column input, provide context about what each column contains
+    const columnContext = inputColumns.map(col => {
+      const header = inputColumnHeaders[col] || `Column ${col}`;
+      return `- ${col}: ${header}`;
+    }).join('\n');
+    
+    // Enhance the prompt with column context
+    if (taskType === 'classify' || taskType === 'categorize') {
+      enhancedPrompt = `You have the following data columns:\n${columnContext}\n\n` +
+        `Based on ALL this information, ${prompt.replace('Text:', 'classify this row:')}`;
+    } else {
+      enhancedPrompt = `Data columns available:\n${columnContext}\n\n${prompt}`;
+    }
+    
+    console.log('📊 Enhanced prompt for multi-column:', enhancedPrompt.substring(0, 100) + '...');
+  }
+  
+  // Build better summary for multi-column
+  if (isMultiColumn) {
+    const headersList = inputColumns.map(c => inputColumnHeaders[c] || c).join(', ');
+    summary = `I'll use ${headersList} to ${taskLabel.toLowerCase()} and write results to column ${outputColumns.join(', ')}.`;
+  }
+  
+  return {
+    summary: summary,
+    inputRange: inputRange,
+    inputColumn: inputColumn,
+    inputColumns: inputColumns,  // Array of all input columns
+    inputColumnHeaders: inputColumnHeaders,  // Map of column -> header
+    isMultiColumn: isMultiColumn,
+    hasMultipleInputColumns: isMultiColumn,  // Alias for Agent.gs compatibility
+    taskType: taskType,  // Use lowercase taskType ('classify') not taskLabel ('Classify')
+    outputColumns: outputColumns,
+    model: modelMap[taskType] || 'GEMINI',
+    rowCount: rowCount,
+    prompt: enhancedPrompt,
+    originalPrompt: prompt,
+    columnPrompts: Object.keys(columnPrompts).length > 0 ? columnPrompts : undefined,
+    languages: languages.length > 0 ? languages : undefined,
+    confidence: 'high'
+  };
+}
+
+// Alias for compatibility with TaskChain modules
+const processCommand = processAgentCommand;
+
+console.log('📦 Agent Parsing module loaded');
+</script>

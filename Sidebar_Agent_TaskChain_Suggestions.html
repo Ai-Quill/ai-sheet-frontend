@@ -1,0 +1,462 @@
+<!--
+  @file Sidebar_Agent_TaskChain_Suggestions.html
+  @version 2.0.0
+  @created 2026-02-05
+  @updated 2026-02-11
+  
+  TASK CHAIN - Suggestions Module (Hybrid: Local + AI)
+  
+  OPTIMIZATION (v2.0.0):
+  - Simple single-step actions → smart local suggestions (zero API cost)
+  - Complex/multi-step or generative actions → AI-powered suggestions
+  - "Get AI suggestions" opt-in link on local suggestions
+  - Rate-limited: skip if last AI suggestion was < 60s ago
+  
+  Contains:
+  - Smart local suggestion generator (action-type + context aware)
+  - API-driven suggestions for complex workflows
+  - Gating logic to choose local vs API
+  - Suggestion rendering with opt-in upgrade
+  
+  Depends on: Sidebar_Agent_TaskChain_State.html, Sidebar_Agent_TaskChain_UI.html
+-->
+
+<script>
+// ============================================
+// SUGGESTION CONFIGURATION
+// ============================================
+
+/** Actions that are simple enough for local suggestions (no API call) */
+const LOCAL_SUGGESTION_ACTIONS = new Set([
+  'format', 'sheetOps', 'filter', 'conditionalFormat', 'dataValidation', 'table'
+]);
+
+/** Actions that benefit from AI-powered suggestions */
+const AI_SUGGESTION_ACTIONS = new Set([
+  'writeData', 'formula', 'chart', 'chat'
+]);
+
+/** Minimum seconds between AI suggestion API calls */
+const AI_SUGGESTION_COOLDOWN_MS = 60000; // 60 seconds
+
+/** Timestamp of last AI suggestion fetch */
+let lastAISuggestionTime = 0;
+
+// ============================================
+// SMART LOCAL SUGGESTIONS (ZERO API COST)
+// ============================================
+
+/**
+ * Generate smart suggestions based on action type and data context.
+ * No API call needed — uses action-aware rules + column/header context.
+ * 
+ * @param {Object} chainState - Completed chain state
+ * @returns {Object} { suggestions: [], source: 'local' }
+ */
+function generateLocalSuggestions(chainState) {
+  const completedSteps = chainState.steps?.filter(s => s.status === 'completed') || [];
+  const lastStep = completedSteps[completedSteps.length - 1] || {};
+  const action = (lastStep.action || '').toLowerCase();
+  const headers = window.currentContext?.selectionInfo?.headers || [];
+  const headerNames = headers.map(h => h.name || h.column);
+  const prompt = (lastStep.prompt || lastStep.description || '').toLowerCase();
+  
+  // Get column info for context-aware suggestions
+  const numericCols = headers.filter(h => {
+    const name = (h.name || '').toLowerCase();
+    return name.includes('revenue') || name.includes('amount') || name.includes('price') || 
+           name.includes('cost') || name.includes('salary') || name.includes('total') ||
+           name.includes('count') || name.includes('number') || name.includes('qty') ||
+           name.includes('score') || name.includes('rate') || name.includes('percent');
+  });
+  const dateCols = headers.filter(h => {
+    const name = (h.name || '').toLowerCase();
+    return name.includes('date') || name.includes('year') || name.includes('founded') ||
+           name.includes('created') || name.includes('time') || name.includes('month');
+  });
+  
+  const suggestions = [];
+  
+  switch (action) {
+    case 'format':
+      // After formatting, suggest related visual/data improvements
+      if (prompt.includes('number') || prompt.includes('currency') || prompt.includes('accounting') || prompt.includes('decimal')) {
+        suggestions.push(
+          { icon: '📊', title: 'Create a chart', command: 'Create a chart to visualize the numeric data' },
+          { icon: '🎨', title: 'Add conditional formatting', command: 'Add color scale conditional formatting to highlight high and low values' },
+          { icon: '📋', title: 'Add data validation', command: 'Add data validation to ensure numeric columns only accept valid numbers' }
+        );
+      } else if (prompt.includes('rotate') || prompt.includes('wrap') || prompt.includes('header')) {
+        suggestions.push(
+          { icon: '🎨', title: 'Style the header row', command: 'Bold the header row and add a bottom border' },
+          { icon: '📐', title: 'Auto-fit columns', command: 'Auto-fit all columns to their content' },
+          { icon: '🧊', title: 'Freeze header row', command: 'Freeze the first row so headers stay visible when scrolling' }
+        );
+      } else if (prompt.includes('bold') || prompt.includes('color') || prompt.includes('background') || prompt.includes('font')) {
+        suggestions.push(
+          { icon: '📐', title: 'Auto-fit columns', command: 'Auto-fit all columns to their content' },
+          { icon: '🔲', title: 'Add borders', command: 'Add thin borders to all data cells' },
+          { icon: '🎨', title: 'Add alternating colors', command: 'Apply alternating row colors for better readability' }
+        );
+      } else {
+        // Generic format follow-ups
+        suggestions.push(
+          { icon: '📐', title: 'Auto-fit columns', command: 'Auto-fit all columns to their content' },
+          { icon: '🎨', title: 'Add conditional formatting', command: 'Add conditional formatting to highlight important values' },
+          { icon: '🔲', title: 'Add borders', command: 'Add thin borders to all data cells' }
+        );
+      }
+      break;
+      
+    case 'sheetops':
+      suggestions.push(
+        { icon: '🎨', title: 'Format the table', command: 'Format the data with professional styling - bold headers, borders, and alternating row colors' },
+        { icon: '🧊', title: 'Freeze headers', command: 'Freeze the first row' },
+        { icon: '🔍', title: 'Add filters', command: 'Add filter dropdowns to all columns' }
+      );
+      break;
+      
+    case 'filter':
+      suggestions.push(
+        { icon: '📊', title: 'Chart filtered data', command: 'Create a chart from the visible/filtered data' },
+        { icon: '🔢', title: 'Count results', command: 'Count how many rows match the current filter' },
+        { icon: '📋', title: 'Sort the data', command: 'Sort the filtered data by the most relevant column' }
+      );
+      break;
+      
+    case 'conditionalformat':
+      suggestions.push(
+        { icon: '📊', title: 'Create a chart', command: 'Create a chart to visualize the data trends' },
+        { icon: '🔍', title: 'Add filters', command: 'Add filter dropdowns to quickly find specific values' },
+        { icon: '📐', title: 'Auto-fit columns', command: 'Auto-fit all columns to their content' }
+      );
+      break;
+      
+    case 'datavalidation':
+      suggestions.push(
+        { icon: '🔽', title: 'Add dropdown lists', command: 'Add dropdown selection lists for categorical columns' },
+        { icon: '🎨', title: 'Highlight invalid cells', command: 'Add conditional formatting to highlight cells that don\'t meet validation criteria' },
+        { icon: '🛡️', title: 'Protect the sheet', command: 'Protect the sheet to prevent accidental edits to validated data' }
+      );
+      break;
+      
+    case 'table':
+      suggestions.push(
+        { icon: '🔍', title: 'Add filters', command: 'Add filter dropdowns to all columns' },
+        { icon: '📊', title: 'Create a chart', command: 'Create a chart from the table data' },
+        { icon: '🧮', title: 'Add summary row', command: 'Add a summary row with totals and averages for numeric columns' }
+      );
+      break;
+      
+    default:
+      // Fallback local suggestions using data context
+      if (numericCols.length > 0) {
+        suggestions.push(
+          { icon: '📊', title: 'Chart the data', command: 'Create a chart to visualize the data' },
+          { icon: '🎨', title: 'Add conditional formatting', command: 'Add color scale to highlight high and low values' },
+          { icon: '🧮', title: 'Add summary statistics', command: 'Calculate sum, average, min, and max for numeric columns' }
+        );
+      } else {
+        suggestions.push(
+          { icon: '🎨', title: 'Format the table', command: 'Format the data with professional styling' },
+          { icon: '🔍', title: 'Add filters', command: 'Add filter dropdowns to all columns' },
+          { icon: '📊', title: 'Create a chart', command: 'Create a chart to visualize the data' }
+        );
+      }
+  }
+  
+  return {
+    suggestions: suggestions.slice(0, 3),
+    source: 'local'
+  };
+}
+
+// ============================================
+// GATING LOGIC: LOCAL vs AI SUGGESTIONS
+// ============================================
+
+/**
+ * Determine whether to use local or AI suggestions.
+ * 
+ * Rules:
+ * - Single-step + simple action → local
+ * - Multi-step (2+) → AI
+ * - Generative action (writeData, formula, chart, chat) → AI
+ * - AI on cooldown (< 60s since last) → local
+ * 
+ * @param {Object} chainState
+ * @returns {'local'|'ai'}
+ */
+function chooseSuggestionStrategy(chainState) {
+  const completedSteps = chainState.steps?.filter(s => s.status === 'completed') || [];
+  const stepCount = completedSteps.length;
+  
+  // Multi-step workflows benefit from AI suggestions
+  if (stepCount >= 2) {
+    // But respect cooldown
+    if (Date.now() - lastAISuggestionTime < AI_SUGGESTION_COOLDOWN_MS) {
+      console.log('🎯 [Suggestions] Multi-step but AI on cooldown → local');
+      return 'local';
+    }
+    return 'ai';
+  }
+  
+  // Single step - check action type
+  const action = (completedSteps[0]?.action || '').toLowerCase();
+  
+  if (AI_SUGGESTION_ACTIONS.has(action)) {
+    if (Date.now() - lastAISuggestionTime < AI_SUGGESTION_COOLDOWN_MS) {
+      console.log('🎯 [Suggestions] AI action but on cooldown → local');
+      return 'local';
+    }
+    return 'ai';
+  }
+  
+  // Simple action → always local
+  return 'local';
+}
+
+// ============================================
+// AI-POWERED SUGGESTIONS (API CALL)
+// ============================================
+
+/**
+ * Fetch suggestions from backend API via GAS proxy.
+ * Only called for complex/generative workflows.
+ * 
+ * @param {Object} chainState - Completed chain state
+ * @returns {Promise<Object>} {suggestions: [], source: string}
+ */
+async function fetchChainSuggestions(chainState) {
+  console.log('🎯 [Suggestions] Fetching AI suggestions from API...');
+  
+  const selectedModel = document.getElementById('agentModelSelect')?.value || 'GEMINI';
+  console.log('🎯 [Suggestions] Using model from UI:', selectedModel);
+  
+  const completedSteps = chainState.steps?.filter(s => s.status === 'completed') || [];
+  const context = {
+    steps: completedSteps.map(s => ({
+      action: s.action,
+      description: s.description,
+      outputFormat: s.outputFormat,
+      inputColumns: s.inputColumns,
+      prompt: s.prompt?.substring(0, 200)
+    })),
+    outputColumns: completedSteps.map(s => s.outputColumn).filter(Boolean),
+    rowCount: chainState.rowCount || chainState.totalSteps,
+    headers: window.currentContext?.selectionInfo?.headers || []
+  };
+  
+  console.log('[Suggestions] Sending context:', JSON.stringify(context).substring(0, 500));
+  
+  return new Promise((resolve) => {
+    google.script.run
+      .withSuccessHandler(data => {
+        console.log('🎯 [Suggestions] Got', data?.suggestions?.length || 0, 'AI suggestions from', data?.source || 'api');
+        lastAISuggestionTime = Date.now();
+        
+        if (data?.workflowId) {
+          lastSuggestionWorkflowId = data.workflowId;
+        }
+        
+        resolve(data || { suggestions: [], source: 'empty' });
+      })
+      .withFailureHandler(error => {
+        console.error('🎯 [Suggestions] GAS error:', error);
+        // Fall back to local suggestions instead of generic ones
+        resolve(generateLocalSuggestions(chainState));
+      })
+      .fetchChainSuggestionsFromBackend(context, selectedModel);
+  });
+}
+
+/**
+ * Get fallback insight when API fails (minimal hardcoding)
+ */
+function getFallbackInsight(rowCount, stepCount) {
+  return `Processed ${rowCount || 'multiple'} rows across ${stepCount} step${stepCount > 1 ? 's' : ''}.`;
+}
+
+/**
+ * Get generic fallback suggestions (minimal hardcoding for reliability)
+ */
+function getGenericFallbackSuggestions(cols) {
+  const suggestions = [
+    'Create summary statistics',
+    'Identify outliers and anomalies',
+    'Build a pivot table or chart'
+  ];
+  
+  if (cols.length > 0) {
+    suggestions.unshift(`Analyze column ${cols[0]} results`);
+  }
+  
+  return suggestions.slice(0, 3);
+}
+
+// ============================================
+// MAIN ENTRY POINT
+// ============================================
+
+/**
+ * Show contextual "What's next?" suggestions after chain completion.
+ * 
+ * HYBRID STRATEGY (v2.0.0):
+ * - Simple actions → instant local suggestions (no API cost)
+ * - Complex/generative → AI-powered suggestions (with cooldown)
+ * - Local suggestions include "Get AI suggestions" opt-in link
+ * 
+ * @param {Object} chainState - Completed chain state
+ */
+async function showChainNextActionSuggestions(chainState) {
+  const strategy = chooseSuggestionStrategy(chainState);
+  console.log('🎯 [Suggestions] Strategy:', strategy);
+  
+  let suggestionsData;
+  
+  if (strategy === 'local') {
+    // Instant local suggestions — no API call
+    suggestionsData = generateLocalSuggestions(chainState);
+    console.log('🎯 [Suggestions] Generated', suggestionsData.suggestions.length, 'local suggestions (zero API cost)');
+  } else {
+    // AI-powered suggestions for complex workflows
+    suggestionsData = await fetchChainSuggestions(chainState);
+  }
+  
+  if (!suggestionsData.suggestions || suggestionsData.suggestions.length === 0) {
+    console.log('🎯 [Suggestions] No suggestions to show');
+    return;
+  }
+  
+  // Store chainState for potential AI upgrade
+  window._lastChainStateForSuggestions = chainState;
+  
+  renderChainSuggestions(suggestionsData.suggestions, suggestionsData.source);
+}
+
+// ============================================
+// RENDERING
+// ============================================
+
+/**
+ * Render suggestions UI.
+ * Local suggestions include a "Get AI suggestions" opt-in link.
+ * AI suggestions show "AI-powered" badge.
+ */
+function renderChainSuggestions(suggestions, source) {
+  const messagesDiv = document.getElementById('agentMessages');
+  if (!messagesDiv) return;
+  
+  // Remove any existing suggestion card first
+  const existing = messagesDiv.querySelector('[data-type="chain-suggestions"]');
+  if (existing) existing.remove();
+  
+  // Store suggestions in global array for click handling
+  window._chainSuggestionItems = suggestions.map(suggestion => ({
+    title: typeof suggestion === 'string' ? suggestion : suggestion.title,
+    command: typeof suggestion === 'object' ? (suggestion.command || suggestion.title) : suggestion
+  }));
+  
+  const suggestionsHtml = suggestions.map((suggestion, idx) => {
+    const title = typeof suggestion === 'string' ? suggestion : suggestion.title;
+    const icon = typeof suggestion === 'object' && suggestion.icon ? suggestion.icon : ['📊', '🔍', '📈', '✨'][idx % 4];
+    
+    return `
+      <button onclick="handleChainSuggestionClick(${idx})" 
+              class="w-full text-left p-2 hover:bg-emerald-50 rounded-md transition-colors group">
+        <div class="flex items-start gap-2">
+          <span class="text-emerald-500 mt-0.5">${icon}</span>
+          <div>
+            <div class="text-[11px] font-medium text-gray-800 group-hover:text-emerald-700">${escapeHtml(title)}</div>
+          </div>
+        </div>
+      </button>
+    `;
+  }).join('');
+  
+  // Source label and optional AI upgrade link
+  let sourceLabel = '';
+  let aiUpgradeLink = '';
+  
+  if (source === 'llm' || source === 'memory') {
+    sourceLabel = `<span class="text-[10px] bg-emerald-100 text-emerald-600 px-1.5 py-0.5 rounded">AI-powered</span>`;
+  } else if (source === 'local') {
+    aiUpgradeLink = `
+      <button onclick="upgradeToAISuggestions()" 
+              class="text-[10px] text-emerald-600 hover:text-emerald-800 hover:underline ml-auto flex-shrink-0 transition-colors"
+              id="aiSuggestionsUpgradeBtn">
+        ✨ Get AI suggestions
+      </button>`;
+  }
+  
+  const html = `
+    <div class="bg-gradient-to-br from-emerald-50 to-teal-50 rounded-lg p-3 border border-emerald-100 mt-3" data-type="chain-suggestions">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="text-lg">🎯</span>
+        <span class="text-[12px] font-semibold text-emerald-800">What's next?</span>
+        ${sourceLabel}
+        ${aiUpgradeLink}
+      </div>
+      <div class="space-y-1">
+        ${suggestionsHtml}
+      </div>
+    </div>
+  `;
+  
+  messagesDiv.insertAdjacentHTML('beforeend', html);
+  autoScrollMessages();
+}
+
+// ============================================
+// AI UPGRADE (OPT-IN)
+// ============================================
+
+/**
+ * User clicked "Get AI suggestions" — fetch from API and replace local suggestions.
+ */
+async function upgradeToAISuggestions() {
+  const btn = document.getElementById('aiSuggestionsUpgradeBtn');
+  if (btn) {
+    btn.textContent = '⏳ Loading...';
+    btn.disabled = true;
+    btn.classList.add('opacity-50');
+  }
+  
+  const chainState = window._lastChainStateForSuggestions;
+  if (!chainState) {
+    console.warn('🎯 [Suggestions] No chain state for AI upgrade');
+    return;
+  }
+  
+  console.log('🎯 [Suggestions] User requested AI suggestions upgrade');
+  const suggestionsData = await fetchChainSuggestions(chainState);
+  
+  if (suggestionsData.suggestions && suggestionsData.suggestions.length > 0) {
+    // Replace existing suggestions with AI ones
+    renderChainSuggestions(suggestionsData.suggestions, suggestionsData.source || 'llm');
+  } else {
+    // AI returned nothing, restore button
+    if (btn) {
+      btn.textContent = '✨ Get AI suggestions';
+      btn.disabled = false;
+      btn.classList.remove('opacity-50');
+    }
+  }
+}
+
+// ============================================
+// CLICK HANDLER
+// ============================================
+
+/**
+ * Handle suggestion button click (safe from inline JS escaping issues)
+ */
+function handleChainSuggestionClick(idx) {
+  const item = window._chainSuggestionItems && window._chainSuggestionItems[idx];
+  if (item) {
+    executeNextAction(item.command, item.title);
+  }
+}
+
+console.log('📦 Agent TaskChain Suggestions module loaded (v2.0.0 - Hybrid)');
+</script>

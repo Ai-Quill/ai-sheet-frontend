@@ -1,295 +1,422 @@
-var CryptoJS = cCryptoGS.CryptoJS;
+/**
+ * @file Code.gs
+ * @version 2.2.0
+ * @updated 2026-01-10
+ * @author AISheeter Team
+ * 
+ * CHANGELOG:
+ * - 2.2.0 (2026-01-10): Added include() helper for modular HTML
+ * - 2.1.0 (2026-01-10): Input validation for empty prompts
+ * - 2.0.0 (2026-01-09): Initial modular architecture
+ * 
+ * ============================================
+ * CODE.gs - Main Entry Point
+ * ============================================
+ * 
+ * Core AISheeter functionality:
+ * - Menu and sidebar initialization
+ * - AI query functions (ChatGPT, Claude, Groq, Gemini)
+ * - Image generation (DALL-E)
+ * - Contact form
+ * 
+ * Dependencies:
+ * - Config.gs    → Environment configuration
+ * - ApiClient.gs → HTTP request utilities
+ * - Crypto.gs    → Encryption/decryption
+ * - User.gs      → User management & settings
+ * - Prompts.gs   → Saved prompts CRUD
+ */
 
+// ============================================
+// MENU & SIDEBAR
+// ============================================
+
+/**
+ * Initialize menu when spreadsheet opens
+ */
 function onOpen() {
   var ui = SpreadsheetApp.getUi();
+  
   ui.createMenu('AISheeter - Any LLM in One Google Sheets™')
     .addItem('Show Sidebar', 'showSidebar')
-    // Remove the line below if it exists
-    // .addItem('Test API Connection', 'testAPIConnection')
-    .addItem('Open Sidebar', 'openSidebar')
     .addItem('Manage Saved Prompts', 'openPromptManager')
     .addToUi();
-Sheeter
-  // Automatically show the sidebar when the spreadsheet is opened
+  
+  // Auto-show sidebar on open
   showSidebar();
 }
 
+/**
+ * Display the main sidebar
+ * Uses HTML templates with includes for modular architecture
+ * Wide mode uses modeless dialog (can be any size)
+ * Narrow mode uses standard sidebar
+ */
 function showSidebar() {
-  var html = HtmlService.createHtmlOutputFromFile('Sidebar')
-    .setTitle('AI Sheet - Any LLM')
-    .setWidth(300);
-  SpreadsheetApp.getUi().showSidebar(html);
-}
-
-function getUserEmail() {
-  var email = PropertiesService.getUserProperties().getProperty('userEmail');
-  if (!email) {
-    email = Session.getActiveUser().getEmail();
-    setUserEmail(email);
+  var template = HtmlService.createTemplateFromFile('Sidebar');
+  var isWideMode = getSidebarWidthPreference();
+  
+  var html = template.evaluate()
+    .setTitle('AI Sheet - Any LLM');
+  
+  if (isWideMode) {
+    // Wide mode: Use modeless dialog positioned on the right
+    html.setWidth(500).setHeight(700);
+    SpreadsheetApp.getUi().showModelessDialog(html, 'AI Sheet - Any LLM');
+  } else {
+    // Narrow mode: Use standard sidebar
+    SpreadsheetApp.getUi().showSidebar(html);
   }
-  return email;
 }
 
-function setUserEmail(email) {
-  PropertiesService.getUserProperties().setProperty('userEmail', email);
+/**
+ * Get user's sidebar width preference
+ * @return {boolean} true for wide mode (dialog), false for narrow (sidebar)
+ */
+function getSidebarWidthPreference() {
+  var props = PropertiesService.getUserProperties();
+  var pref = props.getProperty('SIDEBAR_WIDE_MODE');
+  // Default to narrow mode (sidebar) for now - more stable
+  return pref === 'true';
 }
 
-function logCreditUsage(creditsUsed) {
-  var userProperties = PropertiesService.getUserProperties();
-  var logs = userProperties.getProperty('creditUsageLogs') || '';
-  logs += `Credits used: ${creditsUsed.toFixed(4)}\n`;
-  userProperties.setProperty('creditUsageLogs', logs);
+/**
+ * Toggle sidebar width and refresh
+ * @return {boolean} New wide mode state
+ */
+function toggleSidebarWidth() {
+  var props = PropertiesService.getUserProperties();
+  var currentWide = getSidebarWidthPreference();
+  var newWide = !currentWide;
+  props.setProperty('SIDEBAR_WIDE_MODE', String(newWide));
+  
+  // Refresh with new mode
+  showSidebar();
+  
+  return newWide;
 }
 
-function AIQuery(model, input, specificModel) {
-  var userEmail = getUserEmail();
-  var userSettings = getUserSettings();
-  var encryptedApiKey = encryptApiKey(userSettings[model].apiKey);
+/**
+ * Include helper for modular HTML
+ * 
+ * Usage in HTML: <?!= include('Sidebar_Styles') ?>
+ * 
+ * This enables splitting large HTML files into manageable modules:
+ * - Sidebar_Styles.html   → CSS styles
+ * - Sidebar_Bulk.html     → Bulk Agent functionality
+ * - Sidebar_Settings.html → Settings forms
+ * - Sidebar_Utils.html    → Utilities (toast, menu, helpers)
+ * 
+ * @param {string} filename - HTML file to include (without .html extension)
+ * @return {string} The HTML content
+ */
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
+
+// ============================================
+// AI QUERY - CORE FUNCTION
+// ============================================
+
+/**
+ * Core AI query function
+ * Routes requests to the appropriate provider via backend API
+ * Includes context engineering with automatic task type inference
+ * 
+ * @param {string} model - Provider name (CHATGPT, CLAUDE, GROQ, GEMINI)
+ * @param {string} input - User prompt
+ * @param {string} [imageUrl] - Optional image URL for vision models
+ * @param {string} [specificModel] - Optional specific model ID
+ * @param {string} [taskType] - Optional task type (auto-detected if not provided)
+ * @return {string} AI response or error message
+ */
+function AIQuery(model, input, imageUrl, specificModel, taskType) {
+  // Validate input - prevent empty API calls
+  if (!input || (typeof input === 'string' && input.trim() === '')) {
+    return '';  // Return empty for empty input (no error, just skip)
+  }
+  
+  // Use default model if not specified
   if (!specificModel) {
-    switch(model) {
-      case 'CHATGPT':
-        specificModel = 'gpt-4o';
-        break;
-      case 'CLAUDE':
-        specificModel = 'claude-3-sonnet-20240229';
-        break;
-      case 'GROQ':
-        specificModel = 'llama-3.1-8b-instant';
-        break;
-      case 'GEMINI':
-        specificModel = 'gemini-1.5-flash';
-        break;
-      default:
-        // Optional: handle unknown model or leave specificModel as undefined
-        break;
-    }
+    specificModel = Config.getDefaultModel(model);
   }
-  var url = 'https://aisheet.vercel.app/api/query';
-  var payload = {
+  
+  // Infer task type for context engineering (if not provided)
+  if (!taskType) {
+    taskType = inferTaskType(input);
+  }
+  
+  // Build request payload using SecureRequest (centralized API key handling)
+  var payload = SecureRequest.buildPayloadWithUser(model, {
     model: model,
     input: input,
-    userEmail: userEmail,
     specificModel: specificModel,
-    encryptedApiKey: encryptedApiKey  // This is already encrypted
-  };
-  var options = {
-    'method': 'post',
-    'contentType': 'application/json',
-    'payload': JSON.stringify(payload),
-    'muteHttpExceptions': true
-  };
-  
-  try {
-    Logger.log('Request URL: ' + url);
-    Logger.log('Request Payload: ' + JSON.stringify(payload));
-    
-    var response = UrlFetchApp.fetch(url, options);
-    var responseText = response.getContentText();
-    Logger.log('Response: ' + responseText);
-    
-    var result = JSON.parse(responseText);
-    if (result.error) {
-      return "Error: " + result.error;
+    imageUrl: imageUrl || null,
+    taskType: taskType  // Backend applies appropriate system prompt
+  });
+      
+      try {
+    // Log in debug mode
+    if (Config.isDebug()) {
+      Logger.log('AIQuery: ' + model + ' → ' + specificModel + ' [' + taskType + ']');
     }
-    logCreditUsage(result.creditsUsed);
-    return result.result;
+    
+    var result = ApiClient.post('QUERY', payload);
+    
+    // Track credit usage locally
+    if (result.creditsUsed) {
+        logCreditUsage(result.creditsUsed);
+    }
+    
+        return result.result;
+    
+      } catch (error) {
+    Logger.log('AIQuery Error: ' + error.toString());
+    return 'Error: ' + error.message;
+      }
+    }
+
+// ============================================
+// CUSTOM FUNCTIONS (Sheet Formulas)
+// ============================================
+
+    /**
+ * Query ChatGPT (OpenAI)
+ * @param {string} prompt - The input prompt
+ * @param {string} [imageUrl] - Optional image URL for vision
+ * @param {string} [model] - Specific model (default: gpt-5-mini)
+ * @return {string} AI response
+     * @customfunction
+     */
+    function ChatGPT(prompt, imageUrl, model) {
+      return AIQuery('CHATGPT', prompt, imageUrl, model);
+    }
+
+/**
+ * Query Claude (Anthropic)
+ * @param {string} prompt - The input prompt
+ * @param {string} [imageUrl] - Optional image URL for vision
+ * @param {string} [model] - Specific model (default: claude-haiku-4-5)
+ * @return {string} AI response
+ * @customfunction
+ */
+function Claude(prompt, imageUrl, model) {
+  return AIQuery('CLAUDE', prompt, imageUrl, model);
+}
+
+/**
+ * Query Groq (Fast inference)
+ * @param {string} prompt - The input prompt
+ * @param {string} [imageUrl] - Optional image URL for vision
+ * @param {string} [model] - Specific model (default: meta-llama/llama-4-scout-17b-16e-instruct)
+ * @return {string} AI response
+ * @customfunction
+ */
+function Groq(prompt, imageUrl, model) {
+  return AIQuery('GROQ', prompt, imageUrl, model);
+}
+
+/**
+ * Query Gemini (Google)
+ * @param {string} prompt - The input prompt
+ * @param {string} [imageUrl] - Optional image URL for vision
+ * @param {string} [model] - Specific model (default: gemini-2.5-flash)
+ * @return {string} AI response
+ * @customfunction
+ */
+function Gemini(prompt, imageUrl, model) {
+  return AIQuery('GEMINI', prompt, imageUrl, model);
+}
+
+// ============================================
+// IMAGE GENERATION
+// ============================================
+
+/**
+ * Generate an image using AI
+ * @param {string} provider - Provider (DALLE, GEMINI)
+ * @param {string} prompt - Image description
+ * @param {string} model - Specific model
+ * @return {string} Generated image URL
+ * @throws {Error} If generation fails
+ */
+function generateImage(provider, prompt, model) {
+  // Validate input - prevent empty API calls
+  if (!prompt || (typeof prompt === 'string' && prompt.trim() === '')) {
+    return '';  // Return empty for empty input
+  }
+  
+  // Map image model to API provider for key lookup
+  var apiProvider;
+  if (model === 'DALLE') {
+    apiProvider = 'CHATGPT';  // DALL-E uses OpenAI API key
+  } else if (model === 'GEMINI') {
+    apiProvider = 'GEMINI';
+  } else {
+    throw new Error('Unsupported model for image generation: ' + model);
+  }
+  
+  // Build payload using SecureRequest (centralized API key handling)
+  var payload = SecureRequest.buildPayload(apiProvider, {
+    model: provider,
+    prompt: prompt,
+    userId: getUserId(),
+    specificModel: model
+  });
+
+  try {
+    var result = ApiClient.post('GENERATE_IMAGE', payload);
+    return result.imageUrl;
   } catch (error) {
-    Logger.log('Error: ' + error.toString());
-    return "Error: " + error.toString();
+    console.error('Error generating image:', error);
+    throw new Error('Failed to generate image: ' + error.message);
   }
 }
 
 /**
- * Custom function to call ChatGPT model
- * @param {string} input - The input prompt for the model
- * @param {string} model - The specific model to use (optional)
- * @return {string} - The result from the AI model
+ * Generate image with DALL-E (OpenAI)
+ * @param {string} prompt - Image description
+ * @return {string} Generated image URL
  * @customfunction
  */
-function ChatGPT(input, model) {
-  return AIQuery('CHATGPT', input, model);
+function DALLE(prompt) {
+  return generateImage('DALLE', prompt, 'DALLE');
 }
+
+// ============================================
+// MODELS API
+// ============================================
 
 /**
- * Custom function to call Claude model
- * @param {string} input - The input prompt for the model
- * @param {string} model - The specific model to use (optional)
- * @return {string} - The result from the AI model
- * @customfunction
+ * Fetch available models from backend
+ * Used by Settings panel to populate dropdowns
+ * @return {Array<Object>} List of available models
+ * @throws {Error} If request fails
  */
-function Claude(input, model) {
-  return AIQuery('CLAUDE', input, model);
-}
-
-/**
- * Custom function to call Groq model
- * @param {string} input - The input prompt for the model
- * @param {string} model - The specific model to use (optional)
- * @return {string} - The result from the AI model
- * @customfunction
- */
-function Groq(input, model) {
-  return AIQuery('GROQ', input, model);
-}
-
-/**
- * Custom function to call Gemini model
- * @param {string} input - The input prompt for the model
- * @param {string} model - The specific model to use (optional)
- * @return {string} - The result from the AI model
- * @customfunction
- */
-function Gemini(input, model) {
-  return AIQuery('GEMINI', input, model);
-}
-
-// Update the saveAllSettings function
-function saveAllSettings(settings) {
-  try {
-    console.log('Received settings:', JSON.stringify(settings));
-    
-    // Validate settings
-    if (!settings || typeof settings !== 'object') {
-      throw new Error('Invalid settings object');
-    }
-
-    const models = ['CHATGPT', 'CLAUDE', 'GROQ', 'GEMINI'];
-    models.forEach(model => {
-      if (!settings[model] || typeof settings[model] !== 'object') {
-        throw new Error(`Invalid settings for ${model}`);
-      }
-      if (typeof settings[model].apiKey !== 'string') {
-        throw new Error(`Invalid API key for ${model}`);
-      }
-      if (typeof settings[model].defaultModel !== 'string') {
-        throw new Error(`Invalid default model for ${model}`);
-      }
-      // Encrypt the API key
-      settings[model].apiKey = encryptApiKey(settings[model].apiKey);
-    });
-
-    // Get the user's email
-    var userEmail = getUserEmail();
-    
-    // Prepare the payload in the format the server expects
-    var payload = {
-      userEmail: userEmail,
-      settings: settings
-    };
-
-    // Save settings
-    var url = 'https://aisheet.vercel.app/api/save-all-settings';
-    var options = {
-      'method': 'post',
-      'contentType': 'application/json',
-      'payload': JSON.stringify(payload),
-      'muteHttpExceptions': true
-    };
-
-    var response = UrlFetchApp.fetch(url, options);
-    var result = JSON.parse(response.getContentText());
-
-    if (result.error) {
-      throw new Error(result.error);
-    }
-
-    console.log('Settings saved successfully');
-    return 'Settings saved successfully';
-  } catch (error) {
-    console.error('Error in saveAllSettings:', error);
-    throw new Error('Failed to save settings: ' + error.message);
-  }
-}
-
-// Update the getUserSettings function
-function getUserSettings() {
-  var userEmail = getUserEmail();
-  
-  var url = 'https://aisheet.vercel.app/api/get-user-settings?userEmail=' + encodeURIComponent(userEmail);
-  
-  try {
-    var response = UrlFetchApp.fetch(url);
-    var result = JSON.parse(response.getContentText());
-    var settings = result.settings;
-
-    // Decrypt the API keys to show to the user
-    Object.keys(settings).forEach(model => {
-      if (settings[model].apiKey) {
-        settings[model].apiKey = decryptApiKey(settings[model].apiKey);
-      }
-    });
-
-    return settings;
-  } catch (error) {
-    throw new Error("Error fetching user settings: " + error.toString());
-  }
-}
-
-function getCreditUsageLogs() {
-  return PropertiesService.getUserProperties().getProperty('creditUsageLogs') || '';
-}
-
-function saveApiKey(apiKey) {
-    // Logic to save the API key
-    // This might involve saving to a user properties, or sending to a server
-    PropertiesService.getUserProperties().setProperty('apiKey', apiKey);
-}
-
 function fetchModels() {
-  var url = 'https://aisheet.vercel.app/api/models';
   try {
-    var response = UrlFetchApp.fetch(url);
-    var models = JSON.parse(response.getContentText());
-    console.log('Fetched models:', models);  // Add this line for debugging
-    return models;
+    return ApiClient.get('MODELS');
   } catch (error) {
     console.error('Error fetching models:', error);
-    throw error;  // Rethrow the error so it can be caught by the failure handler
+    throw new Error('Failed to fetch models: ' + error.message);
   }
 }
 
-// Update the encryptApiKey function
-function encryptApiKey(apiKey) {
-  var salt = PropertiesService.getScriptProperties().getProperty('ENCRYPTION_SALT');
-  if (!salt) {
-    salt = Utilities.getUuid();
-    PropertiesService.getScriptProperties().setProperty('ENCRYPTION_SALT', salt);
+// ============================================
+// FORMULA-FIRST EVALUATION
+// ============================================
+
+/**
+ * Check if a task can be solved with a native formula
+ * This is called BEFORE creating AI jobs - the "formula-first" approach
+ * 
+ * @param {Object} context - Task context
+ * @param {string} context.command - User's original command
+ * @param {string} context.taskType - Detected task type
+ * @param {string} context.inputColumn - Input column letter
+ * @param {string} context.outputColumn - Output column letter
+ * @param {string} context.inputRange - Input data range
+ * @param {string} context.categories - Categories for classification
+ * @return {Object} { canUseFormula: boolean, formula?: string, explanation: string }
+ */
+/**
+ * Check if task can be solved with formula
+ * Uses unified context system for FULL data context
+ * 
+ * @param {Object} context - Task context from frontend
+ * @return {Object} Formula evaluation result
+ */
+function checkFormulaFirst(context) {
+  Logger.log('[Code] checkFormulaFirst called with unified context approach');
+  
+  try {
+    // If we don't have rich context, build it
+    if (!context.columnDetails && !context.dataSummary) {
+      Logger.log('[Code] Enriching context with unified context builder...');
+      var unifiedContext = buildUnifiedContext({ command: context.command });
+      
+      // Merge unified context with provided context
+      context.allColumns = context.allColumns || unifiedContext.inputColumns;
+      context.columnDetails = unifiedContext.dataColumns;
+      context.dataSummary = unifiedContext.dataSummary;
+      context.columnHeaders = context.columnHeaders || unifiedContext.headers;
+      context.dataStartRow = context.dataStartRow || unifiedContext.dataStartRow;
+      context.dataEndRow = context.dataEndRow || unifiedContext.endRow;
+      context.isMultiColumn = unifiedContext.inputColumns.length > 1;
+      
+      Logger.log('[Code] Enriched context with ' + unifiedContext.inputColumns.length + ' columns');
+    }
+    
+    // GENERIC APPROACH: Let AI evaluate with FULL context
+    // No hardcoded rules - AI sees all data and decides the best approach
+    var result = evaluateFormulaFirst(context);
+    
+    Logger.log('[Code] Formula evaluation result: ' + JSON.stringify(result));
+    return result;
+    
+  } catch (e) {
+    Logger.log('[Code] checkFormulaFirst error: ' + e.message);
+    return {
+      canUseFormula: false,
+      explanation: 'Error during formula evaluation: ' + e.message
+    };
   }
-  return CryptoJS.AES.encrypt(apiKey, salt).toString();
 }
 
-// Update the decryptApiKey function
-function decryptApiKey(encryptedApiKey) {
-  var salt = PropertiesService.getScriptProperties().getProperty('ENCRYPTION_SALT');
-  return CryptoJS.AES.decrypt(encryptedApiKey, salt).toString(CryptoJS.enc.Utf8);
+/**
+ * Get unified context for frontend
+ * This is the primary way to get full data context
+ */
+function getUnifiedSelectionContext(command) {
+  return buildUnifiedContext({ command: command });
 }
 
-function setEncryptionSalt() {
-  var salt = Utilities.getUuid();
-  PropertiesService.getScriptProperties().setProperty('ENCRYPTION_SALT', salt);
-  Logger.log('Encryption salt set: ' + salt);
+// ============================================
+// CONTACT FORM
+// ============================================
+
+/**
+ * Submit contact form to backend
+ * @param {string} name - Sender name
+ * @param {string} email - Sender email
+ * @param {string} message - Message content
+ * @return {boolean} Success status
+ * @throws {Error} If submission fails
+ */
+function submitContactForm(name, email, message) {
+  var payload = {
+    name: name,
+    email: email,
+    message: message
+  };
+  
+  try {
+    ApiClient.post('CONTACT', payload);
+    return true;
+  } catch (error) {
+    console.error('Error submitting contact form:', error);
+    throw new Error('Failed to submit contact form: ' + error.message);
+  }
 }
 
-function generateAndSetEncryptionSalt() {
-  var salt = Utilities.getUuid();
-  PropertiesService.getScriptProperties().setProperty('ENCRYPTION_SALT', salt);
-  Logger.log('New encryption salt generated and set: ' + salt);
-  return salt;
+// ============================================
+// DEPRECATED FUNCTIONS
+// ============================================
+
+/**
+ * @deprecated Stratico API is no longer supported (January 2026)
+ * Use ChatGPT(), Claude(), Groq(), or Gemini() instead.
+ * @customfunction
+ */
+function Stratico(prompt, imageUrl, model) {
+  return 'DEPRECATED: Stratico is no longer supported. Please use =ChatGPT(), =Claude(), =Groq(), or =Gemini() instead.';
 }
 
-function getSavedPrompts() {
-  // Call your backend API to fetch saved prompts
-  // Return the prompts to the frontend
-}
-
-function savePrompt(name, prompt, variables) {
-  // Call your backend API to save a new prompt
-}
-
-function updatePrompt(id, name, prompt, variables) {
-  // Call your backend API to update an existing prompt
-}
-
-function deletePrompt(id) {
-  // Call your backend API to delete a prompt
+/**
+ * @deprecated Stratico API is no longer supported (January 2026)
+ * Use DALLE() instead for image generation.
+ * @customfunction
+ */
+function StraticoImage(prompt, model) {
+  return 'DEPRECATED: StraticoImage is no longer supported. Please use =DALLE() instead.';
 }

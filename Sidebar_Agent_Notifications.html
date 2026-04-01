@@ -1,0 +1,481 @@
+<!--
+  @file Sidebar_Agent_Notifications.html
+  @version 1.0.0
+  @updated 2026-01-21
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-21): Initial implementation
+    - Browser notifications for task completion
+    - Sound notification option
+    - Tab title update when in background
+    - Notification settings persistence
+  
+  ============================================
+  SIDEBAR_AGENT_NOTIFICATIONS - Notification Module
+  ============================================
+  
+  Notifies users when background tasks complete:
+  - Browser push notifications (requires permission)
+  - Audio alert (subtle chime)
+  - Tab title badge when page not focused
+  
+  Included by: Sidebar.html
+-->
+
+<script>
+// ============================================
+// NOTIFICATION SETTINGS
+// ============================================
+
+const NOTIFICATION_CONFIG = {
+  // Default settings (can be overridden by user)
+  enabled: true,
+  sound: true,
+  browserNotification: true,
+  tabTitleUpdate: true,
+  
+  // Sound settings
+  soundVolume: 0.3,
+  
+  // Tab title settings
+  originalTitle: document.title,
+  flashInterval: null
+};
+
+// Load saved settings from localStorage
+function loadNotificationSettings() {
+  try {
+    const saved = localStorage.getItem('aisheet_notification_settings');
+    if (saved) {
+      const settings = JSON.parse(saved);
+      Object.assign(NOTIFICATION_CONFIG, settings);
+    }
+  } catch (e) {
+    console.warn('Failed to load notification settings:', e);
+  }
+}
+
+// Save settings to localStorage
+function saveNotificationSettings() {
+  try {
+    const toSave = {
+      enabled: NOTIFICATION_CONFIG.enabled,
+      sound: NOTIFICATION_CONFIG.sound,
+      browserNotification: NOTIFICATION_CONFIG.browserNotification,
+      tabTitleUpdate: NOTIFICATION_CONFIG.tabTitleUpdate,
+      soundVolume: NOTIFICATION_CONFIG.soundVolume
+    };
+    localStorage.setItem('aisheet_notification_settings', JSON.stringify(toSave));
+  } catch (e) {
+    console.warn('Failed to save notification settings:', e);
+  }
+}
+
+// ============================================
+// BROWSER NOTIFICATION
+// ============================================
+
+/**
+ * Request notification permission from user
+ * @return {Promise<string>} Permission status: 'granted', 'denied', 'default'
+ */
+function requestNotificationPermission() {
+  return new Promise(function(resolve) {
+    if (!('Notification' in window)) {
+      console.log('Browser does not support notifications');
+      resolve('unsupported');
+      return;
+    }
+    
+    if (Notification.permission === 'granted') {
+      resolve('granted');
+      return;
+    }
+    
+    if (Notification.permission === 'denied') {
+      resolve('denied');
+      return;
+    }
+    
+    // Request permission
+    Notification.requestPermission().then(function(permission) {
+      resolve(permission);
+    });
+  });
+}
+
+/**
+ * Show a browser notification
+ * @param {string} title - Notification title
+ * @param {Object} options - Notification options
+ */
+function showBrowserNotification(title, options) {
+  if (!NOTIFICATION_CONFIG.enabled || !NOTIFICATION_CONFIG.browserNotification) {
+    return;
+  }
+  
+  if (!('Notification' in window) || Notification.permission !== 'granted') {
+    return;
+  }
+  
+  // Don't show if page is focused
+  if (document.hasFocus()) {
+    return;
+  }
+  
+  const defaultOptions = {
+    icon: 'https://www.gstatic.com/images/branding/product/1x/sheets_2020q4_48dp.png',
+    badge: 'https://www.gstatic.com/images/branding/product/1x/sheets_2020q4_48dp.png',
+    tag: 'aisheet-task-complete',
+    renotify: true,
+    requireInteraction: false,
+    silent: NOTIFICATION_CONFIG.sound ? false : true // If sound is enabled, don't use system sound
+  };
+  
+  const notification = new Notification(title, Object.assign(defaultOptions, options));
+  
+  // Auto-close after 5 seconds
+  setTimeout(function() {
+    notification.close();
+  }, 5000);
+  
+  // Focus window when clicked
+  notification.onclick = function() {
+    window.focus();
+    notification.close();
+  };
+}
+
+// ============================================
+// SOUND NOTIFICATION
+// ============================================
+
+// Audio context for playing sounds
+let audioContext = null;
+
+/**
+ * Play a completion sound
+ * Uses Web Audio API for a gentle chime
+ */
+function playCompletionSound() {
+  if (!NOTIFICATION_CONFIG.enabled || !NOTIFICATION_CONFIG.sound) {
+    return;
+  }
+  
+  try {
+    // Create audio context if needed
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    
+    // Resume if suspended (browser autoplay policy)
+    if (audioContext.state === 'suspended') {
+      audioContext.resume();
+    }
+    
+    const volume = NOTIFICATION_CONFIG.soundVolume;
+    
+    // Create a gentle two-tone chime
+    playTone(audioContext, 880, 0.1, volume);  // A5
+    setTimeout(function() {
+      playTone(audioContext, 1108.73, 0.15, volume);  // C#6
+    }, 100);
+    
+  } catch (e) {
+    console.warn('Failed to play notification sound:', e);
+  }
+}
+
+/**
+ * Play a single tone
+ */
+function playTone(ctx, frequency, duration, volume) {
+  const oscillator = ctx.createOscillator();
+  const gainNode = ctx.createGain();
+  
+  oscillator.connect(gainNode);
+  gainNode.connect(ctx.destination);
+  
+  oscillator.frequency.value = frequency;
+  oscillator.type = 'sine';
+  
+  // Fade in/out for smoother sound
+  const now = ctx.currentTime;
+  gainNode.gain.setValueAtTime(0, now);
+  gainNode.gain.linearRampToValueAtTime(volume, now + 0.01);
+  gainNode.gain.linearRampToValueAtTime(0, now + duration);
+  
+  oscillator.start(now);
+  oscillator.stop(now + duration);
+}
+
+// ============================================
+// TAB TITLE NOTIFICATION
+// ============================================
+
+/**
+ * Update tab title to show completion
+ * @param {string} message - Message to show (e.g., "Task Complete")
+ * @param {boolean} flash - Whether to flash the title
+ */
+function updateTabTitle(message, flash) {
+  if (!NOTIFICATION_CONFIG.enabled || !NOTIFICATION_CONFIG.tabTitleUpdate) {
+    return;
+  }
+  
+  // Clear any existing flash
+  if (NOTIFICATION_CONFIG.flashInterval) {
+    clearInterval(NOTIFICATION_CONFIG.flashInterval);
+    NOTIFICATION_CONFIG.flashInterval = null;
+  }
+  
+  const completedTitle = '✓ ' + message;
+  
+  if (flash && !document.hasFocus()) {
+    // Flash between original and completion title
+    let showComplete = true;
+    document.title = completedTitle;
+    
+    NOTIFICATION_CONFIG.flashInterval = setInterval(function() {
+      if (document.hasFocus()) {
+        // Stop flashing when focused
+        clearInterval(NOTIFICATION_CONFIG.flashInterval);
+        NOTIFICATION_CONFIG.flashInterval = null;
+        document.title = NOTIFICATION_CONFIG.originalTitle;
+        return;
+      }
+      
+      showComplete = !showComplete;
+      document.title = showComplete ? completedTitle : NOTIFICATION_CONFIG.originalTitle;
+    }, 1000);
+  } else {
+    document.title = completedTitle;
+    
+    // Reset after 3 seconds if focused
+    if (document.hasFocus()) {
+      setTimeout(function() {
+        document.title = NOTIFICATION_CONFIG.originalTitle;
+      }, 3000);
+    }
+  }
+}
+
+/**
+ * Reset tab title to original
+ */
+function resetTabTitle() {
+  if (NOTIFICATION_CONFIG.flashInterval) {
+    clearInterval(NOTIFICATION_CONFIG.flashInterval);
+    NOTIFICATION_CONFIG.flashInterval = null;
+  }
+  document.title = NOTIFICATION_CONFIG.originalTitle;
+}
+
+// Reset title when window gains focus
+window.addEventListener('focus', function() {
+  resetTabTitle();
+});
+
+// ============================================
+// MAIN NOTIFICATION FUNCTION
+// ============================================
+
+/**
+ * Notify user that a task has completed
+ * This is the main entry point - call this when tasks finish
+ * 
+ * @param {Object} options - Notification options
+ * @param {string} options.title - Task title (e.g., "Classification Complete")
+ * @param {string} options.message - Details (e.g., "Processed 50 rows in 12s")
+ * @param {string} options.type - Type: 'success', 'warning', 'error'
+ * @param {number} options.rowCount - Number of rows processed
+ * @param {number} options.duration - Time taken in ms
+ */
+function notifyTaskComplete(options) {
+  options = options || {};
+  
+  const title = options.title || 'Task Complete';
+  const message = options.message || '';
+  const type = options.type || 'success';
+  
+  // Format duration if provided
+  let durationText = '';
+  if (options.duration) {
+    const seconds = Math.round(options.duration / 1000);
+    durationText = seconds < 60 ? seconds + 's' : Math.round(seconds / 60) + 'm';
+  }
+  
+  // Build notification body
+  let body = message;
+  if (options.rowCount && durationText) {
+    body = 'Processed ' + options.rowCount + ' rows in ' + durationText;
+  } else if (options.rowCount) {
+    body = 'Processed ' + options.rowCount + ' rows';
+  }
+  
+  // 1. Browser notification (if not focused)
+  if (!document.hasFocus()) {
+    showBrowserNotification(title, {
+      body: body,
+      tag: 'aisheet-' + type
+    });
+  }
+  
+  // 2. Sound notification
+  if (type === 'success') {
+    playCompletionSound();
+  }
+  
+  // 3. Tab title update
+  updateTabTitle(title, !document.hasFocus());
+  
+  console.log('📢 Task notification:', title, body);
+}
+
+/**
+ * Notify that a chain/workflow has completed
+ * 
+ * @param {Object} chainState - Chain state object
+ * @param {number} duration - Time taken in ms
+ */
+function notifyChainComplete(chainState, duration) {
+  const stepCount = chainState?.steps?.length || 0;
+  const title = 'Workflow Complete';
+  const message = stepCount + ' step' + (stepCount !== 1 ? 's' : '') + ' completed';
+  
+  notifyTaskComplete({
+    title: title,
+    message: message,
+    type: 'success',
+    duration: duration
+  });
+}
+
+// ============================================
+// NOTIFICATION SETTINGS UI
+// ============================================
+
+/**
+ * Toggle notification setting
+ * @param {string} setting - Setting name
+ * @param {boolean} value - New value
+ */
+function setNotificationSetting(setting, value) {
+  if (NOTIFICATION_CONFIG.hasOwnProperty(setting)) {
+    NOTIFICATION_CONFIG[setting] = value;
+    saveNotificationSettings();
+    console.log('Notification setting updated:', setting, '=', value);
+    
+    // If enabling browser notifications, request permission
+    if (setting === 'browserNotification' && value) {
+      requestNotificationPermission().then(function(status) {
+        if (status !== 'granted') {
+          showToast('Browser notifications blocked. Check your browser settings.', 'warning');
+        }
+      });
+    }
+  }
+}
+
+/**
+ * Get current notification settings
+ * @return {Object} Current settings
+ */
+function getNotificationSettings() {
+  return {
+    enabled: NOTIFICATION_CONFIG.enabled,
+    sound: NOTIFICATION_CONFIG.sound,
+    browserNotification: NOTIFICATION_CONFIG.browserNotification,
+    tabTitleUpdate: NOTIFICATION_CONFIG.tabTitleUpdate,
+    soundVolume: NOTIFICATION_CONFIG.soundVolume,
+    permissionStatus: ('Notification' in window) ? Notification.permission : 'unsupported'
+  };
+}
+
+/**
+ * Render notification settings UI (for settings panel)
+ * @return {string} HTML for settings
+ */
+function renderNotificationSettings() {
+  const settings = getNotificationSettings();
+  const permissionText = settings.permissionStatus === 'granted' ? '(allowed)' : 
+                         settings.permissionStatus === 'denied' ? '(blocked)' : 
+                         settings.permissionStatus === 'unsupported' ? '(not supported)' : '(not requested)';
+  
+  return `
+    <div class="notification-settings">
+      <h4 class="text-xs font-medium text-gray-700 mb-2">Task Notifications</h4>
+      
+      <label class="notification-setting">
+        <input type="checkbox" ${settings.enabled ? 'checked' : ''} 
+               onchange="setNotificationSetting('enabled', this.checked)">
+        <span>Enable notifications</span>
+      </label>
+      
+      <label class="notification-setting ${!settings.enabled ? 'opacity-50' : ''}">
+        <input type="checkbox" ${settings.sound ? 'checked' : ''} 
+               ${!settings.enabled ? 'disabled' : ''}
+               onchange="setNotificationSetting('sound', this.checked)">
+        <span>Play sound when complete</span>
+      </label>
+      
+      <label class="notification-setting ${!settings.enabled ? 'opacity-50' : ''}">
+        <input type="checkbox" ${settings.browserNotification ? 'checked' : ''} 
+               ${!settings.enabled ? 'disabled' : ''}
+               onchange="setNotificationSetting('browserNotification', this.checked)">
+        <span>Browser notifications ${permissionText}</span>
+      </label>
+      
+      <label class="notification-setting ${!settings.enabled ? 'opacity-50' : ''}">
+        <input type="checkbox" ${settings.tabTitleUpdate ? 'checked' : ''} 
+               ${!settings.enabled ? 'disabled' : ''}
+               onchange="setNotificationSetting('tabTitleUpdate', this.checked)">
+        <span>Update tab title</span>
+      </label>
+    </div>
+  `;
+}
+
+// ============================================
+// INITIALIZATION
+// ============================================
+
+// Load settings on module load
+loadNotificationSettings();
+
+// Store original title
+NOTIFICATION_CONFIG.originalTitle = document.title;
+
+console.log('📦 Agent Notifications module loaded');
+</script>
+
+<style>
+/* Notification Settings Styles */
+.notification-settings {
+  padding: 12px;
+  background: #f9fafb;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+.notification-setting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #374151;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.notification-setting input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: #3b82f6;
+}
+
+.notification-setting:hover {
+  color: #1d4ed8;
+}
+</style>

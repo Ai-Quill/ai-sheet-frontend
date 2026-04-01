@@ -1,0 +1,901 @@
+<!--
+  @file Sidebar_Agent_Validation.html
+  @version 1.0.0
+  @updated 2026-01-21
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-21): Initial implementation
+    - Empty input detection
+    - Sparse data warnings
+    - Validation UI with suggestions
+  
+  ============================================
+  SIDEBAR_AGENT_VALIDATION - Input Validation Module
+  ============================================
+  
+  Validates user selections before task execution to prevent:
+  - Processing empty columns (no data to work with)
+  - Processing sparse data (too many empty cells)
+  - Single cell selections (not a meaningful range)
+  
+  Dependencies:
+  - showToast() from Sidebar_Utils.html
+  - getUnifiedContext() from AgentContext.gs
+  
+  Included by: Sidebar.html
+-->
+
+<script>
+// ============================================
+// INPUT VALIDATION
+// ============================================
+
+/**
+ * Validation result object structure:
+ * {
+ *   valid: boolean,
+ *   warnings: string[],
+ *   errors: string[],
+ *   suggestions: string[],
+ *   context: Object (enriched context if valid)
+ * }
+ */
+
+// Validation thresholds
+const VALIDATION_CONFIG = {
+  minDataRows: 1,              // Minimum rows with data
+  maxEmptyRatio: 0.5,          // Warn if >50% cells are empty
+  minInputColumns: 1,          // At least one column with data
+  requireHeaders: false        // Whether headers are required
+};
+
+/**
+ * Main validation function - validates current selection
+ * Returns validation result with errors, warnings, and suggestions
+ * 
+ * @param {Object} context - Optional context (will fetch if not provided)
+ * @return {Promise<Object>} Validation result
+ */
+function validateInputSelection(context) {
+  return new Promise(function(resolve, reject) {
+    // Get context if not provided
+    if (!context) {
+      google.script.run
+        .withSuccessHandler(function(ctx) {
+          resolve(performValidation(ctx));
+        })
+        .withFailureHandler(function(err) {
+          reject({ valid: false, errors: ['Failed to get selection context: ' + err.message] });
+        })
+        .getUnifiedContext();
+    } else {
+      resolve(performValidation(context));
+    }
+  });
+}
+
+/**
+ * Perform the actual validation on context
+ * @param {Object} context - Unified context from AgentContext.gs
+ * @return {Object} Validation result
+ */
+function performValidation(context) {
+  var result = {
+    valid: true,
+    errors: [],
+    warnings: [],
+    suggestions: [],
+    context: context
+  };
+  
+  // DEBUG: Always log what we have
+  console.log('🔍 [Validation] currentPlan exists?', !!window.currentPlan);
+  if (window.currentPlan) {
+    console.log('🔍 [Validation] currentPlan.inputRange:', window.currentPlan.inputRange);
+    console.log('🔍 [Validation] currentPlan keys:', Object.keys(window.currentPlan).slice(0, 10));
+  }
+  
+  // Simple: If we have a plan with input range, validate it
+  if (window.currentPlan && window.currentPlan.inputRange) {
+    console.log('✅ [Validation] Plan has inputRange, allowing execution');
+    return result;
+  }
+  
+  // Check 1: No selection
+  if (!context || context.error) {
+    result.valid = false;
+    result.errors.push('No selection detected. Please select a range with data.');
+    result.suggestions.push('Select a range that includes your data columns and rows.');
+    return result;
+  }
+  
+  // Check 2: No columns at all
+  if (!context.columns || context.columns.length === 0) {
+    result.valid = false;
+    result.errors.push('No columns in selection.');
+    result.suggestions.push('Select at least one column with data.');
+    return result;
+  }
+  
+  // Check 3: All columns are empty
+  if (!context.dataColumns || context.dataColumns.length === 0) {
+    result.valid = false;
+    result.errors.push('All selected columns are empty.');
+    result.suggestions.push('Your selection contains only empty columns. Try selecting columns that contain your data.');
+    if (context.range) {
+      result.suggestions.push('Current selection: ' + context.range);
+    }
+    return result;
+  }
+  
+  // Check 4: No data rows (only headers)
+  if (context.dataRowCount < VALIDATION_CONFIG.minDataRows) {
+    result.valid = false;
+    result.errors.push('No data rows found (only ' + context.dataRowCount + ' row' + (context.dataRowCount === 1 ? '' : 's') + ').');
+    if (context.hasHeaders) {
+      result.suggestions.push('You may have selected only the header row. Include the data rows below.');
+    } else {
+      result.suggestions.push('Select a range that includes rows with data.');
+    }
+    return result;
+  }
+  
+  // Check 5: Single cell selection (likely accidental)
+  if (context.columns.length === 1 && context.dataRowCount === 1) {
+    result.warnings.push('Only a single cell is selected.');
+    result.suggestions.push('For best results, select the entire data range including multiple rows.');
+  }
+  
+  // Check 6: Sparse data (many empty cells in data columns)
+  var sparseColumns = [];
+  context.dataColumns.forEach(function(col) {
+    var expectedRows = context.dataRowCount;
+    var actualRows = col.rowCount || 0;
+    var emptyRatio = 1 - (actualRows / expectedRows);
+    
+    if (emptyRatio > VALIDATION_CONFIG.maxEmptyRatio) {
+      sparseColumns.push({
+        column: col.column,
+        header: col.header,
+        emptyPercent: Math.round(emptyRatio * 100)
+      });
+    }
+  });
+  
+  if (sparseColumns.length > 0) {
+    var colNames = sparseColumns.map(function(c) {
+      return c.column + ' (' + c.emptyPercent + '% empty)';
+    }).join(', ');
+    result.warnings.push('Some columns have many empty cells: ' + colNames);
+    result.suggestions.push('Empty cells will produce empty results. Consider filling in the missing data first.');
+  }
+  
+  // Check 7: No empty columns for output (not an error, but worth noting)
+  if (context.emptyColumns.length === 0) {
+    result.warnings.push('No empty columns available for output.');
+    result.suggestions.push('Results will need to go in a new column or overwrite existing data.');
+  }
+  
+  // Add helpful info even if valid
+  if (result.valid && result.warnings.length === 0) {
+    result.suggestions.push('Selection looks good: ' + 
+      context.dataColumns.length + ' input column' + (context.dataColumns.length > 1 ? 's' : '') + ', ' +
+      context.dataRowCount + ' row' + (context.dataRowCount > 1 ? 's' : '') + ' of data.');
+  }
+  
+  return result;
+}
+
+/**
+ * Check if context is valid for chain execution
+ * Includes additional checks specific to multi-step workflows
+ * 
+ * @param {Object} context - Context for chain
+ * @param {Object} chain - The chain to execute
+ * @return {Object} Validation result
+ */
+function validateChainInput(context, chain) {
+  var result = {
+    valid: true,
+    errors: [],
+    warnings: [],
+    suggestions: [],
+    context: context
+  };
+  
+  // IMPORTANT: If chain already has valid input configuration from AI analysis,
+  // trust that instead of the current spreadsheet selection.
+  // This happens when AI parses the command and identifies the data range.
+  var chainHasValidInput = chain && 
+    chain.inputColumns && chain.inputColumns.length > 0 &&
+    chain.rowCount && chain.rowCount > 0;
+  
+  if (chainHasValidInput) {
+    console.log('✓ Chain has pre-configured input:', {
+      inputColumns: chain.inputColumns,
+      inputRange: chain.inputRange,
+      rowCount: chain.rowCount
+    });
+    
+    // Chain has valid pre-configured input - skip context validation
+    // Just do chain-specific checks
+  } else {
+    // Chain doesn't have configured input - validate from context
+    result = performValidation(context);
+    
+    if (!result.valid) {
+      return result;
+    }
+  }
+  
+  // Additional chain-specific checks
+  
+  // Check: Will any steps overwrite existing data?
+  if (chain.steps && context && context.selectionInfo) {
+    var columnsWithData = context.selectionInfo.columnsWithData || [];
+    var outputColumnsWithData = [];
+    
+    chain.steps.forEach(function(step) {
+      var outputCols = step.outputColumns || [step.outputColumn];
+      outputCols.forEach(function(col) {
+        if (col && columnsWithData.indexOf(col) !== -1) {
+          outputColumnsWithData.push(col);
+        }
+      });
+    });
+    
+    if (outputColumnsWithData.length > 0) {
+      var uniqueCols = outputColumnsWithData.filter(function(col, idx, arr) {
+        return arr.indexOf(col) === idx;
+      });
+      result.warnings.push('⚠️ Column' + (uniqueCols.length > 1 ? 's ' : ' ') + uniqueCols.join(', ') + 
+        ' already contain' + (uniqueCols.length === 1 ? 's' : '') + ' data and will be overwritten.');
+      result.suggestions.push('Back up your data or choose different output columns before proceeding.');
+    }
+  }
+  
+  // Check: Does chain have enough output columns?
+  var stepsNeedingOutput = (chain.steps || []).filter(function(step) {
+    return step.action !== 'chart'; // Charts don't need output columns
+  }).length;
+  
+  var availableOutputCols = (context && context.emptyColumns) ? context.emptyColumns.length : 10;
+  
+  if (stepsNeedingOutput > availableOutputCols && context && context.emptyColumns) {
+    result.warnings.push('This workflow has ' + stepsNeedingOutput + ' steps but only ' + 
+      availableOutputCols + ' empty column' + (availableOutputCols === 1 ? '' : 's') + ' available.');
+    result.suggestions.push('Some results may need to overwrite existing data. Expand your selection to include more empty columns, or confirm overwrites when prompted.');
+  }
+  
+  return result;
+}
+
+/**
+ * Validate a sheet action step before execution
+ * Sheet actions: chart, format, conditionalFormat, dataValidation, filter
+ * 
+ * @param {Object} step - The step to validate
+ * @param {Object} chain - The parent chain (optional, for context)
+ * @return {Object} Validation result { valid: boolean, error?: string }
+ */
+function validateSheetActionStep(step, chain) {
+  if (!step || !step.action) {
+    return { valid: false, error: 'No step or action specified' };
+  }
+  
+  var config = step.config || chain?.sheetConfig || {};
+  var action = step.action;
+  
+  // Validate based on action type
+  switch (action) {
+    case 'chart':
+      // Chart needs either a dataRange or inputRange
+      if (!config.dataRange && !step.dataRange && !step.inputRange && !chain?.inputRange) {
+        return { valid: false, error: 'Chart requires a data range' };
+      }
+      console.log('✓ [Validation] Chart step validated');
+      return { valid: true };
+      
+    case 'format':
+      // Format needs a range and format type
+      if (!config.range && !step.range && !step.inputRange && !chain?.inputRange) {
+        return { valid: false, error: 'Format requires a range' };
+      }
+      if (!config.formatType && !step.formatType) {
+        return { valid: false, error: 'Format requires a format type (currency, percent, etc.)' };
+      }
+      console.log('✓ [Validation] Format step validated');
+      return { valid: true };
+      
+    case 'conditionalFormat':
+      // Conditional format needs a range and rules
+      if (!config.range && !step.range && !step.inputRange && !chain?.inputRange) {
+        return { valid: false, error: 'Conditional format requires a range' };
+      }
+      if (!config.rules && !step.rules) {
+        return { valid: false, error: 'Conditional format requires at least one rule' };
+      }
+      console.log('✓ [Validation] Conditional format step validated');
+      return { valid: true };
+      
+    case 'dataValidation':
+      // Data validation needs a range and validation type
+      if (!config.range && !step.range && !step.inputRange && !chain?.inputRange) {
+        return { valid: false, error: 'Data validation requires a range' };
+      }
+      if (!config.validationType && !step.validationType) {
+        return { valid: false, error: 'Data validation requires a type (dropdown, number, etc.)' };
+      }
+      // Dropdown requires values
+      var validationType = config.validationType || step.validationType;
+      if (validationType === 'dropdown') {
+        var values = config.values || config.options?.values || step.values || [];
+        if (!values || values.length === 0) {
+          return { valid: false, error: 'Dropdown validation requires a list of values' };
+        }
+      }
+      console.log('✓ [Validation] Data validation step validated');
+      return { valid: true };
+      
+    case 'filter':
+      // Filter needs a data range (criteria is optional - filter can just create the filter UI)
+      if (!config.dataRange && !step.dataRange && !step.inputRange && !chain?.inputRange) {
+        return { valid: false, error: 'Filter requires a data range' };
+      }
+      console.log('✓ [Validation] Filter step validated');
+      return { valid: true };
+      
+    default:
+      // Unknown action type - let it through (might be handled elsewhere)
+      console.log('[Validation] Unknown action type:', action);
+      return { valid: true };
+  }
+}
+
+/**
+ * Check if an action is a sheet action (chart, format, etc.)
+ * @param {string} action - The action type
+ * @return {boolean}
+ */
+function isSheetAction(action) {
+  var sheetActions = ['chart', 'format', 'conditionalFormat', 'dataValidation', 'filter'];
+  return sheetActions.indexOf(action) !== -1;
+}
+
+// ============================================
+// VALIDATION UI
+// ============================================
+
+/**
+ * Show validation result to user
+ * If valid with no warnings, just logs. Otherwise shows UI.
+ * 
+ * @param {Object} validationResult - Result from validateInputSelection
+ * @param {Object} options - Display options
+ * @param {boolean} options.showSuccessToast - Show toast on success
+ * @param {boolean} options.blockOnWarning - Require confirmation for warnings
+ * @return {Promise<boolean>} True if should proceed, false to cancel
+ */
+function showValidationResult(validationResult, options) {
+  options = options || {};
+  
+  return new Promise(function(resolve) {
+    // Valid with no warnings - proceed
+    if (validationResult.valid && validationResult.warnings.length === 0) {
+      if (options.showSuccessToast) {
+        showToast('Selection validated', 'success');
+      }
+      console.log('✓ Input validation passed:', validationResult.suggestions[0]);
+      resolve(true);
+      return;
+    }
+    
+    // Has errors - show error and block
+    if (!validationResult.valid) {
+      showValidationModal(validationResult, function(choice) {
+        resolve(false); // Always block on errors
+      });
+      return;
+    }
+    
+    // Valid but has warnings
+    if (options.blockOnWarning) {
+      showValidationModal(validationResult, function(choice) {
+        resolve(choice === 'proceed');
+      });
+    } else {
+      // Just show toast for warnings, proceed anyway
+      var warningText = validationResult.warnings[0];
+      if (warningText.length > 60) warningText = warningText.substring(0, 57) + '...';
+      showToast(warningText, 'warning');
+      resolve(true);
+    }
+  });
+}
+
+/**
+ * Show validation modal with errors/warnings and suggestions
+ */
+function showValidationModal(result, callback) {
+  // Remove existing modal
+  var existing = document.getElementById('validationModal');
+  if (existing) existing.remove();
+  
+  var isError = !result.valid;
+  var title = isError ? 'Selection Issue' : 'Warning';
+  var icon = isError ? '⚠️' : '💡';
+  var iconBg = isError ? 'bg-red-100' : 'bg-yellow-100';
+  var iconColor = isError ? 'text-red-600' : 'text-yellow-600';
+  
+  var messagesHtml = '';
+  
+  // Show errors
+  if (result.errors.length > 0) {
+    messagesHtml += '<div class="validation-section validation-errors">';
+    result.errors.forEach(function(err) {
+      messagesHtml += '<div class="validation-item"><span class="text-red-600">✗</span> ' + escapeHtml(err) + '</div>';
+    });
+    messagesHtml += '</div>';
+  }
+  
+  // Show warnings
+  if (result.warnings.length > 0) {
+    messagesHtml += '<div class="validation-section validation-warnings">';
+    result.warnings.forEach(function(warn) {
+      messagesHtml += '<div class="validation-item"><span class="text-yellow-600">⚠</span> ' + escapeHtml(warn) + '</div>';
+    });
+    messagesHtml += '</div>';
+  }
+  
+  // Show suggestions
+  if (result.suggestions.length > 0) {
+    messagesHtml += '<div class="validation-section validation-suggestions">';
+    messagesHtml += '<div class="validation-label text-gray-500 text-xs mb-1">Suggestions:</div>';
+    result.suggestions.forEach(function(sug) {
+      messagesHtml += '<div class="validation-item text-gray-600"><span>→</span> ' + escapeHtml(sug) + '</div>';
+    });
+    messagesHtml += '</div>';
+  }
+  
+  var buttonsHtml = '';
+  if (isError) {
+    buttonsHtml = '<button onclick="closeValidationModal(\'cancel\')" class="validation-btn validation-btn-primary">OK, I\'ll reselect</button>';
+  } else {
+    buttonsHtml = `
+      <button onclick="closeValidationModal('cancel')" class="validation-btn validation-btn-secondary">Cancel</button>
+      <button onclick="closeValidationModal('proceed')" class="validation-btn validation-btn-primary">Proceed Anyway</button>
+    `;
+  }
+  
+  var modalHtml = `
+    <div id="validationModal" class="validation-overlay">
+      <div class="validation-modal animate-in">
+        <div class="validation-header">
+          <div class="validation-icon ${iconBg} ${iconColor}">${icon}</div>
+          <h3 class="validation-title">${title}</h3>
+        </div>
+        <div class="validation-body">
+          ${messagesHtml}
+        </div>
+        <div class="validation-footer">
+          ${buttonsHtml}
+        </div>
+      </div>
+    </div>
+  `;
+  
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+  
+  // Store callback for use by closeValidationModal
+  window._validationCallback = callback;
+}
+
+/**
+ * Close validation modal and trigger callback
+ */
+function closeValidationModal(choice) {
+  var modal = document.getElementById('validationModal');
+  if (modal) modal.remove();
+  
+  if (window._validationCallback) {
+    window._validationCallback(choice);
+    window._validationCallback = null;
+  }
+}
+
+// ============================================
+// QUICK VALIDATION (for inline checks)
+// ============================================
+
+/**
+ * Quick check if selection has data - returns boolean
+ * Use for simple enable/disable decisions
+ */
+function hasValidSelection(context) {
+  return context && 
+         context.dataColumns && 
+         context.dataColumns.length > 0 &&
+         context.dataRowCount > 0;
+}
+
+/**
+ * Get validation summary for display
+ * Returns short string like "3 cols, 25 rows" or "⚠️ No data"
+ */
+function getSelectionSummary(context) {
+  if (!context || !context.dataColumns || context.dataColumns.length === 0) {
+    return '⚠️ No data selected';
+  }
+  
+  var cols = context.dataColumns.length;
+  var rows = context.dataRowCount;
+  
+  return cols + ' col' + (cols > 1 ? 's' : '') + ', ' + rows + ' row' + (rows > 1 ? 's' : '');
+}
+
+// ============================================
+// OVERWRITE PROTECTION
+// ============================================
+
+/**
+ * Check if output columns have existing data and prompt for confirmation
+ * 
+ * @param {Array<string>} outputColumns - Column letters to check (e.g., ['C', 'D'])
+ * @param {number} startRow - First row to check
+ * @param {number} rowCount - Number of rows to check
+ * @return {Promise<Object>} { shouldProceed: boolean, columns: string[] }
+ */
+function checkOverwriteProtection(outputColumns, startRow, rowCount) {
+  return new Promise(function(resolve) {
+    if (!outputColumns || outputColumns.length === 0) {
+      resolve({ shouldProceed: true, columns: [] });
+      return;
+    }
+    
+    google.script.run
+      .withSuccessHandler(function(hasData) {
+        if (!hasData) {
+          // No data to overwrite - proceed
+          resolve({ shouldProceed: true, columns: outputColumns });
+        } else {
+          // Data exists - show confirmation
+          showOverwriteConfirmation(outputColumns, startRow, rowCount)
+            .then(function(choice) {
+              resolve({ 
+                shouldProceed: choice === 'overwrite',
+                columns: outputColumns,
+                cancelled: choice === 'cancel',
+                newColumn: choice === 'new' ? getNextEmptyColumn(outputColumns) : null
+              });
+            });
+        }
+      })
+      .withFailureHandler(function(err) {
+        console.warn('Overwrite check failed:', err);
+        // On error, proceed (fail open for better UX)
+        resolve({ shouldProceed: true, columns: outputColumns });
+      })
+      .checkOutputHasData(outputColumns, startRow, rowCount);
+  });
+}
+
+/**
+ * Show overwrite confirmation dialog
+ */
+function showOverwriteConfirmation(columns, startRow, rowCount) {
+  return new Promise(function(resolve) {
+    // Remove existing modal
+    var existing = document.getElementById('overwriteModal');
+    if (existing) existing.remove();
+    
+    var colList = columns.join(', ');
+    var rangeDesc = 'Column' + (columns.length > 1 ? 's' : '') + ' ' + colList + 
+                    ' (rows ' + startRow + '-' + (startRow + rowCount - 1) + ')';
+    
+    var modalHtml = `
+      <div id="overwriteModal" class="validation-overlay">
+        <div class="validation-modal animate-in">
+          <div class="validation-header">
+            <div class="validation-icon bg-orange-100 text-orange-600">⚠️</div>
+            <h3 class="validation-title">Data Already Exists</h3>
+          </div>
+          <div class="validation-body">
+            <p class="text-sm text-gray-700 mb-3">
+              ${escapeHtml(rangeDesc)} already contains data. What would you like to do?
+            </p>
+            <div class="overwrite-options">
+              <label class="overwrite-option">
+                <input type="radio" name="overwriteChoice" value="overwrite" checked>
+                <span class="overwrite-option-text">
+                  <span class="font-medium">Overwrite existing data</span>
+                  <span class="text-gray-500 text-xs">Replace current values with new results</span>
+                </span>
+              </label>
+              <label class="overwrite-option">
+                <input type="radio" name="overwriteChoice" value="new">
+                <span class="overwrite-option-text">
+                  <span class="font-medium">Use next empty column</span>
+                  <span class="text-gray-500 text-xs">Automatically find an empty column for output</span>
+                </span>
+              </label>
+            </div>
+          </div>
+          <div class="validation-footer">
+            <button onclick="closeOverwriteModal('cancel')" class="validation-btn validation-btn-secondary">Cancel</button>
+            <button onclick="submitOverwriteChoice()" class="validation-btn validation-btn-primary">Continue</button>
+          </div>
+        </div>
+      </div>
+    `;
+    
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    
+    // Store callback
+    window._overwriteCallback = resolve;
+  });
+}
+
+/**
+ * Submit the overwrite choice from the modal
+ */
+function submitOverwriteChoice() {
+  var selected = document.querySelector('input[name="overwriteChoice"]:checked');
+  var choice = selected ? selected.value : 'overwrite';
+  closeOverwriteModal(choice);
+}
+
+/**
+ * Close overwrite modal and trigger callback
+ */
+function closeOverwriteModal(choice) {
+  var modal = document.getElementById('overwriteModal');
+  if (modal) modal.remove();
+  
+  if (window._overwriteCallback) {
+    window._overwriteCallback(choice);
+    window._overwriteCallback = null;
+  }
+}
+
+/**
+ * Get next empty column letter after the given columns
+ * Simple version - just increments the last column letter
+ */
+function getNextEmptyColumn(existingColumns) {
+  if (!existingColumns || existingColumns.length === 0) return 'B';
+  
+  var lastCol = existingColumns[existingColumns.length - 1];
+  // Simple increment (works for A-Z, would need enhancement for AA, AB, etc.)
+  return String.fromCharCode(lastCol.charCodeAt(0) + 1);
+}
+
+/**
+ * Check overwrite for a plan before execution
+ * 
+ * @param {Object} plan - The execution plan
+ * @return {Promise<Object>} Modified plan or null if cancelled
+ */
+function checkPlanOverwrite(plan) {
+  return new Promise(function(resolve) {
+    if (!plan) {
+      resolve(null);
+      return;
+    }
+    
+    // Determine output columns from plan
+    var outputColumns = [];
+    if (plan.outputColumn) {
+      outputColumns.push(plan.outputColumn);
+    }
+    if (plan.outputColumns && Array.isArray(plan.outputColumns)) {
+      plan.outputColumns.forEach(function(col) {
+        if (outputColumns.indexOf(col) === -1) outputColumns.push(col);
+      });
+    }
+    
+    if (outputColumns.length === 0) {
+      // No output columns specified - proceed
+      resolve(plan);
+      return;
+    }
+    
+    // Get row info from plan
+    var rangeMatch = (plan.inputRange || '').match(/[A-Z]+(\d+)/i);
+    var startRow = rangeMatch ? parseInt(rangeMatch[1], 10) : 2;
+    var rowCount = plan.rowCount || 10;
+    
+    checkOverwriteProtection(outputColumns, startRow, rowCount)
+      .then(function(result) {
+        if (result.cancelled) {
+          resolve(null); // Cancelled
+        } else if (result.newColumn) {
+          // User chose to use a new column
+          var modifiedPlan = Object.assign({}, plan);
+          modifiedPlan.outputColumn = result.newColumn;
+          showToast('Output changed to column ' + result.newColumn, 'info');
+          resolve(modifiedPlan);
+        } else {
+          resolve(plan); // Proceed with original
+        }
+      });
+  });
+}
+
+// ============================================
+// MODULE LOADED
+// ============================================
+
+console.log('📦 Agent Validation module loaded');
+</script>
+
+<style>
+/* Validation Modal Styles */
+.validation-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.validation-modal {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+  max-width: 320px;
+  width: 90%;
+  overflow: hidden;
+}
+
+.validation-header {
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.validation-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.validation-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+  margin: 0;
+}
+
+.validation-body {
+  padding: 16px;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.validation-section {
+  margin-bottom: 12px;
+}
+
+.validation-section:last-child {
+  margin-bottom: 0;
+}
+
+.validation-item {
+  font-size: 12px;
+  line-height: 1.5;
+  display: flex;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.validation-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.validation-footer {
+  padding: 12px 16px;
+  background: #f9fafb;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.validation-btn {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s;
+}
+
+.validation-btn-primary {
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  color: white;
+}
+
+.validation-btn-primary:hover {
+  opacity: 0.9;
+}
+
+.validation-btn-secondary {
+  background: white;
+  color: #374151;
+  border: 1px solid #d1d5db;
+}
+
+.validation-btn-secondary:hover {
+  background: #f3f4f6;
+}
+
+/* Animation */
+.validation-modal.animate-in {
+  animation: slideIn 0.2s ease-out;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Overwrite Options */
+.overwrite-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.overwrite-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.overwrite-option:hover {
+  border-color: #3b82f6;
+  background: #f8fafc;
+}
+
+.overwrite-option input[type="radio"] {
+  margin-top: 2px;
+  accent-color: #3b82f6;
+}
+
+.overwrite-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.overwrite-option input:checked + .overwrite-option-text {
+  color: #1d4ed8;
+}
+</style>

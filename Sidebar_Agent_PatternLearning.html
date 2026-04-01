@@ -1,0 +1,435 @@
+<!--
+============================================
+SIDEBAR_AGENT_PATTERN_LEARNING
+============================================
+Pattern Learning UI Module
+
+After AI processes results, we analyze for patterns and suggest formulas.
+This makes the agent a TEACHER, not just a tool.
+
+CHANGELOG:
+- 1.1.0 (2026-01-18): Enhanced Pattern Detected Feedback
+  - showPatternDetectedFeedback() - Enhanced UI with rule visualization
+  - Shows detected rules in easy-to-understand format
+  - Better benefits explanation
+  - Save Pattern functionality foundation
+- 1.0.0 (2026-01-16): Initial implementation
+  - showPatternSuggestion() - Display pattern discovery
+  - applyLearnedFormula() - Apply the suggested formula
+  - dismissPattern() - User declines formula
+  - analyzeCompletedJob() - Hook into job completion
+============================================
+-->
+
+<script>
+  
+  // ============================================
+  // PATTERN DETECTED FEEDBACK (Enhanced)
+  // ============================================
+  
+  /**
+   * Show pattern detected feedback after AI completion
+   * This is the main entry point for the Pattern Learning UI
+   * 
+   * @param {Object} pattern - Detected pattern with rules
+   * @param {Object} jobData - Original job data
+   */
+  function showPatternDetectedFeedback(pattern, jobData) {
+    try {
+      if (!pattern || !pattern.hasPattern) return;
+      
+      const accuracyPercent = Math.round((pattern.accuracy || 0) * 100);
+    
+    // Parse rules from pattern for display
+    const rules = parsePatternRules(pattern);
+    
+    // Build the feedback card HTML
+    const html = `
+      <div class="pattern-detected animate-in" id="patternDetectedFeedback">
+        <div class="pattern-header">
+          <span class="pattern-icon">🎓</span>
+          <div class="pattern-title">
+            <h4>Pattern Learned!</h4>
+            <p>We detected a pattern in your results</p>
+          </div>
+          <button onclick="dismissPatternFeedback()" class="text-amber-600 hover:text-amber-800 text-lg leading-none p-1">&times;</button>
+        </div>
+        
+        <div class="pattern-rules">
+          ${rules.map(rule => `
+            <div class="pattern-rule">${escapeHtml(rule)}</div>
+          `).join('')}
+        </div>
+        
+        <div class="pattern-benefits">
+          <strong>Why use a formula?</strong>
+          <p>
+            ✓ Auto-updates when data changes<br>
+            ✓ You keep the classification logic
+          </p>
+        </div>
+        
+        <div class="flex items-center justify-between text-[11px] mb-2">
+          <span class="text-amber-700">Accuracy: <strong>${accuracyPercent}%</strong></span>
+          <span class="text-amber-600">${pattern.patternType === 'threshold' ? 'Numeric thresholds' : 'Keyword matching'}</span>
+        </div>
+        
+        <div class="pattern-actions">
+          <button onclick="applyLearnedPattern()" class="btn btn-primary btn-sm flex-1">
+            ⚡ Apply Formula
+          </button>
+          <button onclick="savePatternForLater()" class="btn btn-outline btn-sm text-[11px]" title="Save for future use">
+            💾 Save
+          </button>
+          <button onclick="dismissPatternFeedback()" class="btn btn-ghost btn-sm text-[11px]">
+            Keep AI
+          </button>
+        </div>
+      </div>
+    `;
+    
+    // Store pattern data for action handlers
+    window._currentLearnedPattern = pattern;
+    window._currentPatternJobData = jobData;
+    
+    // Insert after completion summary
+    const messagesDiv = document.getElementById('agentMessages');
+    messagesDiv.insertAdjacentHTML('beforeend', html);
+    autoScrollMessages();
+    } catch (err) {
+      console.warn('showPatternDetectedFeedback error:', err);
+      // Don't crash - pattern feedback is optional enhancement
+    }
+  }
+  
+  /**
+   * Parse pattern into human-readable rules
+   */
+  function parsePatternRules(pattern) {
+    const rules = [];
+    
+    if (pattern.rules && Array.isArray(pattern.rules)) {
+      // Direct rules from analyzer
+      return pattern.rules.map(r => r.readable || r.rule || String(r));
+    }
+    
+    // Parse from formula if no direct rules
+    if (pattern.formula) {
+      // Try to extract IFS conditions
+      const ifsMatch = pattern.formula.match(/IFS\((.*)\)/i);
+      if (ifsMatch) {
+        const conditions = ifsMatch[1].split(/,\s*(?=[A-Z]|TRUE)/);
+        for (let i = 0; i < conditions.length - 1; i += 2) {
+          const condition = conditions[i];
+          const result = conditions[i + 1]?.replace(/"/g, '');
+          if (condition && result) {
+            // Convert formula condition to readable
+            const readable = condition
+              .replace(/([A-Z]+\d+)/g, 'Value')
+              .replace(/>=/g, ' ≥ ')
+              .replace(/<=/g, ' ≤ ')
+              .replace(/>/g, ' > ')
+              .replace(/</g, ' < ')
+              .replace(/=/g, ' = ');
+            rules.push(`${readable} → ${result}`);
+          }
+        }
+      }
+    }
+    
+    // Fallback: Show explanation
+    if (rules.length === 0 && pattern.explanation) {
+      rules.push(pattern.explanation);
+    }
+    
+    return rules.length > 0 ? rules : ['Pattern detected - click Apply to use formula'];
+  }
+  
+  /**
+   * Apply the learned pattern formula
+   */
+  function applyLearnedPattern() {
+    const pattern = window._currentLearnedPattern;
+    const jobData = window._currentPatternJobData;
+    
+    if (!pattern || !jobData) {
+      showToast('Pattern data not available', 'error');
+      return;
+    }
+    
+    // Call the existing apply function
+    applyLearnedFormula(
+      JSON.stringify(pattern), 
+      JSON.stringify(jobData)
+    );
+  }
+  
+  /**
+   * Save pattern for future use
+   */
+  function savePatternForLater() {
+    const pattern = window._currentLearnedPattern;
+    const jobData = window._currentPatternJobData;
+    
+    if (!pattern) {
+      showToast('No pattern to save', 'error');
+      return;
+    }
+    
+    // Save to pattern history
+    savePatternToHistory(pattern, jobData);
+    
+    showToast('Pattern saved! Next time this will be suggested automatically.', 'success');
+    
+    // Update UI to show saved state
+    const feedbackEl = document.getElementById('patternDetectedFeedback');
+    if (feedbackEl) {
+      const saveBtn = feedbackEl.querySelector('button[onclick="savePatternForLater()"]');
+      if (saveBtn) {
+        saveBtn.innerHTML = '✓ Saved';
+        saveBtn.disabled = true;
+        saveBtn.classList.add('opacity-50');
+      }
+    }
+  }
+  
+  /**
+   * Dismiss pattern feedback
+   */
+  function dismissPatternFeedback() {
+    const feedbackEl = document.getElementById('patternDetectedFeedback');
+    if (feedbackEl) {
+      feedbackEl.style.opacity = '0';
+      feedbackEl.style.transform = 'translateY(-10px)';
+      feedbackEl.style.transition = 'all 0.2s ease-out';
+      setTimeout(() => feedbackEl.remove(), 200);
+    }
+    
+    // Clear stored pattern data
+    window._currentLearnedPattern = null;
+    window._currentPatternJobData = null;
+  }
+  
+  // ============================================
+  // ORIGINAL PATTERN ANALYSIS (Kept for compatibility)
+  // ============================================
+  
+  /**
+   * Analyze completed job for patterns
+   * Called after AI processing completes successfully
+   * 
+   * @param {Object} jobData - Job result data
+   * @param {Array} jobData.inputs - Original input data (multi-column)
+   * @param {Array} jobData.outputs - AI results
+   * @param {Array} jobData.headers - Column headers
+   * @param {string} jobData.inputRange - Input range
+   * @param {string} jobData.outputColumn - Output column
+   * @param {string} jobData.taskType - Task type (classify, etc.)
+   */
+  function analyzeCompletedJobForPattern(jobData) {
+    // Only analyze classification tasks
+    const classifyTasks = ['classify', 'categorize', 'score', 'rate', 'evaluate'];
+    if (!classifyTasks.includes(jobData.taskType?.toLowerCase())) {
+      console.log('🔍 Pattern analysis skipped - not a classification task');
+      return;
+    }
+    
+    if (!jobData.inputs || !jobData.outputs || jobData.outputs.length < 5) {
+      console.log('🔍 Pattern analysis skipped - not enough data');
+      return;
+    }
+    
+    console.log('🔍 Analyzing AI results for patterns...');
+    
+    google.script.run
+      .withSuccessHandler(function(result) {
+        console.log('🔍 Pattern analysis result:', result);
+        
+        if (result && result.hasPattern && result.accuracy >= 0.85) {
+          // Use enhanced pattern feedback UI
+          showPatternDetectedFeedback(result, jobData);
+        } else if (result && !result.hasPattern) {
+          console.log('🔍 No pattern found:', result.reason);
+          // Could show a subtle message that AI was necessary
+        }
+      })
+      .withFailureHandler(function(err) {
+        console.error('Pattern analysis failed:', err);
+      })
+      .analyzeResultsForPattern({
+        inputs: jobData.inputs,
+        outputs: jobData.outputs,
+        headers: jobData.headers,
+        inputRange: jobData.inputRange,
+        outputColumn: jobData.outputColumn
+      });
+  }
+  
+  /**
+   * Show pattern suggestion UI
+   */
+  function showPatternSuggestion(pattern, jobData) {
+    const accuracyPercent = Math.round(pattern.accuracy * 100);
+    const accuracyColor = accuracyPercent >= 95 ? 'green' : accuracyPercent >= 85 ? 'amber' : 'gray';
+    
+    const patternIcon = pattern.patternType === 'threshold' ? '📊' : '🔤';
+    
+    const html = `
+      <div class="card p-3 mt-3 border-2 border-amber-300 bg-gradient-to-br from-amber-50 to-yellow-50" id="patternSuggestion">
+        <div class="flex items-start gap-2 mb-2">
+          <span class="text-xl">${patternIcon}</span>
+          <div class="flex-1">
+            <p class="text-[11px] font-semibold text-amber-800">💡 Pattern Detected!</p>
+            <p class="text-[11px] text-amber-700 mt-0.5">${escapeHtml(pattern.explanation)}</p>
+          </div>
+          <button onclick="dismissPattern()" class="text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>
+        </div>
+        
+        <div class="bg-white/70 rounded-lg p-2 mb-2 border border-amber-200">
+          <p class="text-[11px] text-gray-500 mb-1">Suggested Formula:</p>
+          <code class="text-[11px] text-amber-700 font-mono break-all">${escapeHtml(pattern.formula)}</code>
+        </div>
+        
+        <div class="flex items-center justify-between mb-2">
+          <div class="flex items-center gap-1.5">
+            <span class="text-[11px] text-gray-500">Accuracy:</span>
+            <span class="text-[11px] font-semibold ${accuracyColor === 'green' ? 'text-green-600' : accuracyColor === 'amber' ? 'text-amber-600' : 'text-gray-600'}">${accuracyPercent}%</span>
+          </div>
+          ${pattern.stats ? `
+            <div class="text-[11px] text-gray-500">
+              ${Object.entries(pattern.stats).map(([cat, stat]) => 
+                `<span class="inline-block px-1.5 py-0.5 bg-gray-100 rounded mr-1">${escapeHtml(cat)}: ${stat.count}</span>`
+              ).join('')}
+            </div>
+          ` : ''}
+        </div>
+        
+        <div class="bg-green-50 border border-green-200 rounded p-2 mb-2">
+          <p class="text-[11px] text-green-700">
+            <strong>Why use a formula?</strong><br>
+            ✓ Auto-updates when data changes<br>
+            ✓ You keep the classification logic
+          </p>
+        </div>
+        
+        <div class="flex gap-2" id="patternActions">
+          <button onclick="applyLearnedFormula('${escapeHtml(JSON.stringify(pattern))}', '${escapeHtml(JSON.stringify(jobData))}')" 
+                  class="btn btn-primary btn-sm flex-1">
+            ⚡ Apply Formula
+          </button>
+          <button onclick="dismissPattern()" class="btn btn-outline btn-sm text-[11px]">
+            Keep AI Results
+          </button>
+        </div>
+      </div>
+    `;
+    
+    // Insert after completion summary
+    const messagesDiv = document.getElementById('agentMessages');
+    messagesDiv.insertAdjacentHTML('beforeend', html);
+    autoScrollMessages();
+  }
+  
+  /**
+   * Apply the learned formula to replace AI results
+   */
+  function applyLearnedFormula(patternStr, jobDataStr) {
+    let pattern, jobData;
+    try {
+      pattern = JSON.parse(patternStr);
+      jobData = JSON.parse(jobDataStr);
+    } catch(e) {
+      console.error('Failed to parse pattern data:', e);
+      return;
+    }
+    
+    const suggestionEl = document.getElementById('patternSuggestion');
+    const actionsEl = document.getElementById('patternActions');
+    
+    if (actionsEl) {
+      actionsEl.innerHTML = `
+        <div class="flex items-center gap-2 w-full justify-center">
+          <div class="w-4 h-4 border-2 border-green-300 border-t-green-600 rounded-full animate-spin"></div>
+          <span class="text-[11px] text-green-700 font-medium">Applying formula...</span>
+        </div>
+      `;
+    }
+    
+    // Extract range info from jobData
+    const rangeMatch = jobData.inputRange?.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+    if (!rangeMatch) {
+      console.error('Invalid input range:', jobData.inputRange);
+      return;
+    }
+    
+    const inputCol = rangeMatch[1];
+    const startRow = parseInt(rangeMatch[2]);
+    const endRow = parseInt(rangeMatch[4]);
+    const outputCol = jobData.outputColumn;
+    
+    google.script.run
+      .withSuccessHandler(function(result) {
+        if (suggestionEl) {
+          suggestionEl.className = 'card p-3 mt-3 border-2 border-green-300 bg-gradient-to-br from-green-50 to-emerald-50';
+          suggestionEl.innerHTML = `
+            <div class="flex items-center gap-2">
+              <span class="text-2xl">✨</span>
+              <div>
+                <p class="text-[11px] font-semibold text-green-700">Formula Applied!</p>
+                <p class="text-[11px] text-green-600 mt-0.5">${result.rowCount} rows now use a formula instead of AI results.</p>
+                <p class="text-[11px] text-green-500 mt-1">Next time, data will auto-classify - no AI needed!</p>
+              </div>
+            </div>
+            <div class="mt-2 bg-white/70 rounded p-2">
+              <code class="text-[11px] text-green-700 font-mono break-all">${escapeHtml(pattern.formula)}</code>
+            </div>
+          `;
+        }
+        
+        // Save pattern to history for learning
+        savePatternToHistory(pattern, jobData);
+      })
+      .withFailureHandler(function(err) {
+        if (actionsEl) {
+          actionsEl.innerHTML = `
+            <p class="text-[11px] text-red-600">Failed: ${escapeHtml(err.message)}</p>
+            <button onclick="dismissPattern()" class="btn btn-outline btn-sm text-[11px] mt-1">Dismiss</button>
+          `;
+        }
+      })
+      .applyLearnedFormula(pattern.formula, inputCol, outputCol, startRow, endRow);
+  }
+  
+  /**
+   * Dismiss pattern suggestion
+   */
+  function dismissPattern() {
+    const suggestionEl = document.getElementById('patternSuggestion');
+    if (suggestionEl) {
+      suggestionEl.style.opacity = '0';
+      suggestionEl.style.transform = 'translateY(-10px)';
+      suggestionEl.style.transition = 'all 0.2s ease-out';
+      setTimeout(() => suggestionEl.remove(), 200);
+    }
+  }
+  
+  /**
+   * Save pattern to backend for cross-session learning
+   */
+  function savePatternToHistory(pattern, jobData) {
+    console.log('📚 Saving pattern to backend:', pattern.patternType, pattern.accuracy);
+    google.script.run
+      .withSuccessHandler(function(result) {
+        if (result && result.success) {
+          console.log('📚 Pattern saved successfully');
+        } else {
+          console.warn('📚 Pattern save failed:', result?.reason);
+        }
+      })
+      .withFailureHandler(function(err) {
+        console.warn('📚 Pattern save error:', err);
+      })
+      .savePatternToBackend(pattern, jobData);
+  }
+  
+</script>

@@ -1,0 +1,1197 @@
+<!--
+  @file Sidebar_Agent_Core.html
+  @version 1.0.0
+  @updated 2026-01-13
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-13): Extracted from Sidebar_Agent.html
+    - Agent state management
+    - Tab entry and UI rendering
+    - Model selector
+    - Task history
+  
+  ============================================
+  SIDEBAR_AGENT_CORE - Core Agent Module
+  ============================================
+  
+  Contains:
+  - Agent state (messages, plan, context)
+  - showAgent() entry point
+  - Model selector
+  - Task history management
+  
+  Included by: Sidebar_Agent.html
+-->
+
+<script>
+// ============================================
+// AGENT STATE
+// ============================================
+
+let agentMessages = [];
+let currentPlan = null;
+let agentJobId = null;
+let agentPrefs = { model: 'GEMINI', recentTasks: [] };
+
+// Selection context - captured once when tab opens
+let currentSelectionContext = null;
+
+// Conversation persistence state
+let hasStoredConversation = false;
+let storedConversation = null;
+let conversationRestored = false;
+
+// ============================================
+// CONVERSATION LIMITS (Performance Optimization)
+// ============================================
+// 
+// RATIONALE:
+// - DOM performance degrades with many elements
+// - Long conversations increase memory usage
+// - Backend payload size grows linearly
+// - Users rarely need old messages for current context
+//
+// APPROACH:
+// - VISIBLE_LIMIT: Messages shown in DOM (performance)
+// - MEMORY_LIMIT: Messages kept in memory/storage (context)
+// - Hidden messages are NOT deleted - just collapsed
+// - Users can expand to see older messages
+//
+
+const CONVERSATION_LIMITS = {
+  VISIBLE_LIMIT: 40,    // Max messages visible in DOM at once
+  MEMORY_LIMIT: 100,    // Max messages to keep in memory/persist
+  COLLAPSE_BATCH: 20,   // How many to hide when collapsing
+  AUTO_COLLAPSE: true   // Whether to auto-collapse or let user do it
+};
+
+// Track hidden messages count
+let hiddenMessagesCount = 0;
+
+// ============================================
+// ANALYTICS & EVENT LOGGING
+// ============================================
+
+// Session ID - unique per browser session (persists until tab close)
+const agentSessionId = 'sess_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 9);
+
+// Event queue for batching
+let analyticsEventQueue = [];
+let analyticsFlushTimer = null;
+const ANALYTICS_FLUSH_INTERVAL = 5000; // Flush every 5 seconds
+const ANALYTICS_BATCH_SIZE = 10; // Or when queue reaches this size
+
+/**
+ * Log an analytics event - fire and forget, never blocks UI
+ * 
+ * @param {string} eventType - 'command'|'plan'|'execution'|'error'|'complete'|'action'
+ * @param {Object} payload - Event-specific data (safe, no user content)
+ * @param {Object} context - Optional context override
+ */
+function logAnalyticsEvent(eventType, payload, context) {
+  try {
+    const event = {
+      sessionId: agentSessionId,
+      timestamp: new Date().toISOString(),
+      eventType: eventType,
+      payload: sanitizePayload(payload),
+      context: context ? sanitizeContext(context) : getDefaultContext()
+    };
+    
+    // Add to queue
+    analyticsEventQueue.push(event);
+    
+    // Flush if batch size reached
+    if (analyticsEventQueue.length >= ANALYTICS_BATCH_SIZE) {
+      flushAnalyticsEvents();
+    } else if (!analyticsFlushTimer) {
+      // Schedule flush
+      analyticsFlushTimer = setTimeout(flushAnalyticsEvents, ANALYTICS_FLUSH_INTERVAL);
+    }
+    
+    // Also log to console in dev mode
+    if (window.location.hostname === 'localhost' || window.AISHEETER_DEBUG) {
+      console.log('📊 Analytics:', eventType, payload);
+    }
+  } catch (e) {
+    // Never let analytics break the app
+    console.warn('Analytics logging failed (silent):', e.message);
+  }
+}
+
+/**
+ * Sanitize payload to remove any potentially sensitive data
+ */
+function sanitizePayload(payload) {
+  if (!payload) return {};
+  
+  const safe = {};
+  const allowedFields = [
+    'command', 'commandLanguage', 'planType', 'inputRange', 'outputColumns',
+    'rowCount', 'model', 'duration', 'status', 'errorType', 'errorMessage',
+    'jobCount', 'taskType', 'action', 'source', 'confidence', 'isMultiColumn',
+    'columnCount', 'hasCustomPrompts', 'hasValidation', 'formatHint'
+  ];
+  
+  allowedFields.forEach(field => {
+    if (payload[field] !== undefined) {
+      // Truncate strings to prevent accidental data leakage
+      if (typeof payload[field] === 'string') {
+        safe[field] = payload[field].substring(0, 200);
+      } else if (Array.isArray(payload[field])) {
+        // Only store array of simple values (column letters, etc.)
+        safe[field] = payload[field].map(v => 
+          typeof v === 'string' ? v.substring(0, 50) : v
+        ).slice(0, 20);
+      } else {
+        safe[field] = payload[field];
+      }
+    }
+  });
+  
+  return safe;
+}
+
+/**
+ * Sanitize context - only store safe metadata
+ */
+function sanitizeContext(context) {
+  return {
+    sheetName: context?.sheetName?.substring(0, 50),
+    selectedRange: context?.selectedRange?.substring(0, 20),
+    model: context?.model || agentPrefs?.model,
+    columnHeaders: context?.columnHeaders?.slice(0, 10)?.map(h => 
+      typeof h === 'string' ? h.substring(0, 30) : h?.name?.substring(0, 30)
+    )
+  };
+}
+
+/**
+ * Get default context from current state
+ */
+function getDefaultContext() {
+  const ctx = currentSelectionContext || {};
+  return {
+    sheetName: ctx.sheetName?.substring(0, 50),
+    selectedRange: ctx.selectedRange?.substring(0, 20),
+    model: agentPrefs?.model,
+    columnHeaders: ctx.selectionInfo?.headers?.slice(0, 10)?.map(h => h?.name?.substring(0, 30))
+  };
+}
+
+/**
+ * Flush queued events to backend
+ */
+function flushAnalyticsEvents() {
+  if (analyticsFlushTimer) {
+    clearTimeout(analyticsFlushTimer);
+    analyticsFlushTimer = null;
+  }
+  
+  if (analyticsEventQueue.length === 0) return;
+  
+  // Take all events and clear queue
+  const eventsToSend = analyticsEventQueue.slice();
+  analyticsEventQueue = [];
+  
+  // Send to backend (fire and forget)
+  google.script.run
+    .withSuccessHandler(function() {
+      // Silent success
+    })
+    .withFailureHandler(function(err) {
+      // Silent failure - don't retry, don't block
+      console.warn('Analytics flush failed (silent):', err?.message);
+    })
+    .logAnalyticsEvents(eventsToSend);
+}
+
+// Flush on page unload
+window.addEventListener('beforeunload', function() {
+  if (analyticsEventQueue.length > 0) {
+    flushAnalyticsEvents();
+  }
+});
+
+/**
+ * Helper: Log a command event
+ */
+function logCommandEvent(command, language) {
+  logAnalyticsEvent('command', {
+    command: command,
+    commandLanguage: language || 'en'
+  });
+}
+
+/**
+ * Helper: Log a plan creation event
+ */
+function logPlanEvent(plan) {
+  logAnalyticsEvent('plan', {
+    planType: plan?.isMultiColumn ? 'multi-column' : 'single',
+    inputRange: plan?.inputRange,
+    outputColumns: plan?.outputColumns,
+    rowCount: plan?.rowCount,
+    model: plan?.model,
+    taskType: plan?.taskType,
+    confidence: plan?.confidence,
+    isMultiColumn: plan?.isMultiColumn,
+    columnCount: plan?.outputColumns?.length,
+    hasCustomPrompts: !!(plan?.columnPrompts && Object.keys(plan.columnPrompts).length > 0),
+    hasValidation: !!(plan?.columnValidation && Object.keys(plan.columnValidation).length > 0)
+  });
+}
+
+/**
+ * Helper: Log an execution event
+ */
+function logExecutionEvent(jobIds, status, duration) {
+  logAnalyticsEvent('execution', {
+    jobCount: jobIds?.length || 1,
+    status: status,
+    duration: duration
+  });
+}
+
+/**
+ * Helper: Log an error event
+ */
+function logErrorEvent(errorType, errorMessage, context) {
+  logAnalyticsEvent('error', {
+    errorType: errorType,
+    errorMessage: errorMessage?.substring(0, 200)
+  }, context);
+}
+
+/**
+ * Helper: Log a user action event
+ */
+function logActionEvent(action, source) {
+  logAnalyticsEvent('action', {
+    action: action,
+    source: source || 'ui'
+  });
+}
+
+// ============================================
+// AGENT TAB ENTRY
+// ============================================
+
+function showAgent() {
+  setActiveTab('tab-agent');
+  
+  // Reset conversation restore flag on fresh tab open
+  conversationRestored = false;
+  
+  // Load preferences first
+  google.script.run
+    .withSuccessHandler(function(prefs) {
+      agentPrefs = prefs || { model: 'GEMINI', recentTasks: [] };
+      
+      // Then check for stored conversation
+      google.script.run
+        .withSuccessHandler(function(result) {
+          hasStoredConversation = result.hasConversation || false;
+          storedConversation = result.conversation || null;
+          renderAgentUI();
+        })
+        .withFailureHandler(function(err) {
+          console.error('Failed to load conversation:', err);
+          hasStoredConversation = false;
+          storedConversation = null;
+          renderAgentUI();
+        })
+        .loadConversation();
+    })
+    .withFailureHandler(function(err) {
+      console.error('Failed to load agent prefs:', err);
+      renderAgentUI();
+    })
+    .getAgentPreferences();
+}
+
+function renderAgentUI() {
+  const content = document.getElementById('content');
+  const hasHistory = (agentPrefs.recentTasks?.length || 0) > 0;
+  
+  content.innerHTML = `
+    <div class="agent-layout">
+      <!-- Scrollable Content Area -->
+      <div class="agent-scroll-area">
+        <!-- Messages Area -->
+        <div id="agentMessages" class="space-y-1.5">
+          <!-- Rendered dynamically -->
+        </div>
+        
+        <!-- Discovery Tools (Quick Actions, Templates, Help) -->
+        <!-- These are onboarding/exploration tools, not daily workflow controls -->
+        <div id="discoveryTools" class="mt-2 space-y-1.5">
+          <!-- Quick Actions Row -->
+          <div class="flex flex-wrap gap-1" id="quickActionsInline">
+            <button onclick="selectQuickAction('translate')" class="discovery-chip"><i data-lucide="languages" class="icon-xs"></i> Translate</button>
+            <button onclick="selectQuickAction('summarize')" class="discovery-chip"><i data-lucide="file-text" class="icon-xs"></i> Summarize</button>
+            <button onclick="selectQuickAction('extract')" class="discovery-chip"><i data-lucide="search" class="icon-xs"></i> Extract</button>
+            <button onclick="selectQuickAction('classify')" class="discovery-chip"><i data-lucide="tag" class="icon-xs"></i> Classify</button>
+            <button onclick="selectQuickAction('generate')" class="discovery-chip"><i data-lucide="sparkles" class="icon-xs"></i> Generate</button>
+            <button onclick="selectQuickAction('analyze')" class="discovery-chip"><i data-lucide="chart-column-increasing" class="icon-xs"></i> Analyze</button>
+          </div>
+          
+          <!-- Templates & Help Row -->
+          <div class="flex gap-1.5">
+            <button onclick="toggleTemplatesPanel()" class="discovery-action flex-1" id="templatesBtn">
+              <i data-lucide="layout-template" class="icon-xs"></i> <span>Templates</span>
+            </button>
+            <button onclick="toggleHelpPanel()" class="discovery-action flex-1" id="helpBtn">
+              <i data-lucide="circle-help" class="icon-xs"></i> <span>What can I do?</span>
+            </button>
+          </div>
+
+          <!-- Recent Tasks -->
+          <div class="bg-white border border-gray-100 rounded ${hasHistory ? '' : 'hidden'}" id="taskHistoryCard">
+            <button onclick="toggleTaskHistory(event)" class="w-full flex items-center justify-between px-2 py-1 hover:bg-gray-50 transition-colors rounded text-[11px] text-gray-500">
+              <span class="flex items-center gap-1"><i data-lucide="clock" class="icon-xs"></i> History (${agentPrefs.recentTasks?.length || 0})</span>
+              <i data-lucide="chevron-down" class="icon-xs" id="historyChevronIcon"></i>
+          </button>
+          <div id="taskHistoryContent" class="hidden border-t border-gray-100">
+              <div id="taskHistoryList" class="max-h-24 overflow-y-auto"></div>
+              <button onclick="clearHistory()" class="w-full text-[11px] text-gray-500 hover:text-red-500 py-0.5">Clear</button>
+          </div>
+        </div>
+
+        </div>
+      </div>
+      
+      <!-- Fixed Input Area -->
+      <div class="agent-fixed-input">
+        <!-- Selection Row (moved here to be always visible) -->
+        <div id="selectionRowSticky" class="selection-row-sticky"></div>
+        
+        <!-- Chat Input (primary) -->
+        <textarea id="agentInput" 
+                  placeholder="What to do? e.g. Translate A → B, C (Enter to send, Shift+Enter for new line)"
+                  class="agent-textarea agent-textarea-elevated"
+                  rows="2"
+                  onfocus="onInputFocus()"
+                  oninput="onAgentInputChange(event)"
+                  onkeydown="handleAgentInputKeydown(event)"></textarea>
+        
+        <!-- Controls Row: Minimal — New Chat + Model selector (wide) + Send -->
+        <div class="flex items-center gap-1.5 mt-2">
+          <button onclick="startNewConversation()" class="quick-action" title="New Chat" id="newChatBtn"><i data-lucide="plus" class="icon-sm"></i></button>
+          <select id="agentModelSelect" class="agent-model-select flex-1" onchange="onModelChange(this.value)"></select>
+          <button id="agentSendBtn" onclick="processAgentCommand()" class="agent-send-btn" title="Send (Enter)">
+            <span id="sendBtnText"><i data-lucide="arrow-right" class="icon-sm" style="color: white; stroke-width: 2.5;"></i></span>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  // Populate model selector
+  populateModelSelector();
+  
+  // Render initial messages
+  renderWelcomeMessage();
+  
+  // Render task history
+  renderTaskHistory();
+  
+  // Update send button state based on execution status
+  updateSendButtonState();
+  
+  // Render Lucide icons in dynamically created elements
+  refreshIcons();
+}
+
+// ============================================
+// TOGGLE SECTIONS
+// ============================================
+
+function toggleTaskHistory(e) {
+  if (e) e.stopPropagation();
+  const content = document.getElementById('taskHistoryContent');
+  const chevronIcon = document.getElementById('historyChevronIcon');
+  if (!content) return;
+  
+  const isHidden = content.classList.toggle('hidden');
+  if (chevronIcon) chevronIcon.classList.toggle('rotate-180', !isHidden);
+}
+
+// ============================================
+// MODEL SELECTOR (Auto-routing: user keys first, managed fallback)
+// ============================================
+
+// Model caches
+let isManagedMode = false; // Internal state — auto-determined, not user-toggled
+let managedModelsCache = [];
+let byokModelsCache = [];
+
+function populateModelSelector() {
+  // Load both managed and BYOK models in parallel
+  let loadedCount = 0;
+  const onBothLoaded = function() {
+    loadedCount++;
+    if (loadedCount >= 2) {
+      // Auto-determine mode: use BYOK if user has keys, otherwise managed
+      const hasByokModels = byokModelsCache.length > 0 
+        && !(byokModelsCache.length === 1 && byokModelsCache[0].id === 'NONE');
+      isManagedMode = !hasByokModels;
+      
+      renderModelSelector();
+    }
+  };
+
+  // Load managed models
+  google.script.run
+    .withSuccessHandler(function(models) {
+      managedModelsCache = models || [];
+      onBothLoaded();
+    })
+    .withFailureHandler(function(err) {
+      console.warn('Failed to load managed models:', err);
+      managedModelsCache = [];
+      onBothLoaded();
+    })
+    .getManagedModels();
+
+  // Load BYOK models
+  google.script.run
+    .withSuccessHandler(function(models) {
+      byokModelsCache = models || [];
+      onBothLoaded();
+    })
+    .withFailureHandler(function(err) {
+      console.error('Failed to load BYOK models:', err);
+      byokModelsCache = [];
+      onBothLoaded();
+    })
+    .getAgentModels();
+}
+
+/**
+ * Render the model selector
+ * 
+ * AUTO-ROUTING STRATEGY:
+ * - If user has API keys configured → show their BYOK models (user pays directly)
+ * - If no API keys → show managed/free models (we cover the cost from credits)
+ * - No toggle needed — the system handles this transparently
+ */
+function renderModelSelector() {
+  const select = document.getElementById('agentModelSelect');
+  if (!select) return;
+
+  const models = isManagedMode ? managedModelsCache : byokModelsCache;
+
+  // Handle empty state
+  if (!models || models.length === 0 || (models.length === 1 && models[0].id === 'NONE')) {
+    // Try falling back to managed models
+    if (!isManagedMode && managedModelsCache.length > 0) {
+      isManagedMode = true;
+      renderModelSelector();
+      return;
+    }
+    select.innerHTML = `<option value="NONE" disabled>No models available — add API keys in Settings</option>`;
+    select.disabled = true;
+    return;
+  }
+
+  select.disabled = false;
+
+  // Check if current model is still available
+  const availableIds = models.map(m => m.id);
+  let selectedModel = agentPrefs.model;
+  if (!availableIds.includes(selectedModel)) {
+    // Select first available (prefer recommended)
+    const recommended = models.find(m => m.recommended);
+    selectedModel = recommended ? recommended.id : models[0].id;
+    agentPrefs.model = selectedModel;
+  }
+
+  select.innerHTML = models.map(m => `
+    <option value="${m.id}" ${m.id === selectedModel ? 'selected' : ''}>
+      ${m.icon} ${m.name}${m.price ? ' — ' + m.price : ''}
+    </option>
+  `).join('');
+
+  console.log('📦 Model selector populated:', isManagedMode ? 'managed (auto)' : 'BYOK', models.length, 'models');
+}
+
+/**
+ * Toggle between Free AI (managed) and Your Key (BYOK) mode
+ * Kept for backward compatibility but no longer exposed in UI
+ */
+function toggleModelMode() {
+  isManagedMode = !isManagedMode;
+  renderModelSelector();
+  
+  if (isManagedMode) {
+    showToast('Using free AI models', 'success');
+  } else {
+    showToast('Using your own API keys', 'success');
+  }
+  
+  google.script.run
+    .withSuccessHandler(function() {})
+    .withFailureHandler(function(err) { console.warn('Failed to save mode pref:', err); })
+    .setAgentPreference('managedMode', isManagedMode);
+}
+
+/**
+ * Update the toggle button visual state
+ * Kept for backward compatibility — no-op if button doesn't exist
+ */
+function updateModeToggle() {
+  const toggleBtn = document.getElementById('modeToggleBtn');
+  if (!toggleBtn) return;
+  
+  if (isManagedMode) {
+    toggleBtn.innerHTML = '🆓';
+    toggleBtn.title = 'Free AI mode (click for Your Key)';
+    toggleBtn.className = 'quick-action ring-1 ring-green-300 bg-green-50';
+  } else {
+    toggleBtn.innerHTML = '🔑';
+    toggleBtn.title = 'Your Key mode (click for Free AI)';
+    toggleBtn.className = 'quick-action';
+  }
+}
+
+function onModelChange(model) {
+  agentPrefs.model = model;
+  
+  // Persist to UserProperties
+  google.script.run
+    .withSuccessHandler(function() {
+      showToast('Model: ' + model, 'success');
+    })
+    .withFailureHandler(function(err) {
+      console.error('Failed to save model pref:', err);
+    })
+    .setAgentModel(model);
+}
+
+// ============================================
+// TASK HISTORY
+// ============================================
+
+function renderTaskHistory() {
+  const list = document.getElementById('taskHistoryList');
+  const card = document.getElementById('taskHistoryCard');
+  if (!list) return;
+  
+  const tasks = agentPrefs.recentTasks || [];
+  
+  if (card) {
+    card.classList.toggle('hidden', tasks.length === 0);
+  }
+  
+  if (tasks.length === 0) {
+    list.innerHTML = `<div class="p-2 text-center text-[11px] text-gray-500">No tasks</div>`;
+    return;
+  }
+  
+  list.innerHTML = tasks.map((task, idx) => `
+    <div class="px-2 py-1.5 hover:bg-gray-50 cursor-pointer border-b border-gray-50 last:border-b-0 flex items-center gap-2" onclick="rerunTask(${idx})">
+        <span class="text-xs">${getTaskIcon(task.taskType)}</span>
+      <span class="text-[11px] text-gray-600 flex-1 truncate">${escapeHtml(task.command)}</span>
+      <span class="text-[11px] ${task.status === 'completed' ? 'text-green-500' : 'text-amber-500'}">${task.status === 'completed' ? '✓' : '⚠'}</span>
+    </div>
+  `).join('');
+}
+
+function getTaskIcon(taskType) {
+  const icons = {
+    'Summarize': '📝',
+    'Extract': '🔍',
+    'Translate': '🌐',
+    'Classify': '🏷️',
+    'Generate': '✨',
+    'Clean': '🧹'
+  };
+  return icons[taskType] || '⚡';
+}
+
+function rerunTask(index) {
+  const task = agentPrefs.recentTasks[index];
+  if (!task) return;
+  
+  document.getElementById('agentInput').value = task.command;
+  processAgentCommand();
+}
+
+// ============================================
+// CONVERSATION LIMIT MANAGEMENT
+// ============================================
+
+/**
+ * Check if we need to collapse old messages and do so if needed
+ * Called after each message is added
+ * 
+ * PERFORMANCE STRATEGY:
+ * - Only modify DOM when necessary (batch operations)
+ * - Don't delete messages, just hide them
+ * - Allow user to expand hidden messages
+ * - Memory cleanup happens separately
+ */
+function checkAndCollapseMessages() {
+  if (!CONVERSATION_LIMITS.AUTO_COLLAPSE) return;
+  
+  const messagesDiv = document.getElementById('agentMessages');
+  if (!messagesDiv) return;
+  
+  // Count visible messages (exclude the "show more" button itself)
+  const visibleMessages = messagesDiv.querySelectorAll('[data-type]:not([data-collapsed="true"])');
+  const visibleCount = visibleMessages.length;
+  
+  if (visibleCount <= CONVERSATION_LIMITS.VISIBLE_LIMIT) return;
+  
+  // Need to collapse - hide oldest messages
+  const toHide = visibleCount - CONVERSATION_LIMITS.VISIBLE_LIMIT + CONVERSATION_LIMITS.COLLAPSE_BATCH;
+  
+  collapseOldestMessages(toHide);
+}
+
+/**
+ * Collapse (hide) the oldest N messages in the DOM
+ * Creates or updates the "Show earlier messages" button
+ * 
+ * @param {number} count - Number of messages to collapse
+ */
+function collapseOldestMessages(count) {
+  const messagesDiv = document.getElementById('agentMessages');
+  if (!messagesDiv) return;
+  
+  // Get all visible messages (not already collapsed)
+  const visibleMessages = Array.from(messagesDiv.querySelectorAll('[data-type]:not([data-collapsed="true"])'));
+  
+  // Skip ephemeral messages like thinking indicators
+  const persistentMessages = visibleMessages.filter(msg => {
+    const type = msg.getAttribute('data-type');
+    return type !== 'thinking' && type !== 'progress';
+  });
+  
+  if (persistentMessages.length === 0) return;
+  
+  // Take the oldest N messages
+  const messagesToHide = persistentMessages.slice(0, Math.min(count, persistentMessages.length));
+  
+  // Create a collapsed container for them
+  const collapsedContainer = document.createElement('div');
+  collapsedContainer.setAttribute('data-collapsed-container', 'true');
+  collapsedContainer.className = 'hidden'; // Start hidden
+  
+  // Move messages into the container
+  messagesToHide.forEach(msg => {
+    msg.setAttribute('data-collapsed', 'true');
+    collapsedContainer.appendChild(msg);
+  });
+  
+  // Insert container at the beginning
+  messagesDiv.insertBefore(collapsedContainer, messagesDiv.firstChild);
+  
+  // Update hidden count
+  hiddenMessagesCount += messagesToHide.length;
+  
+  // Create or update the "Show earlier" button
+  updateShowEarlierButton();
+  
+  console.log(`📦 Collapsed ${messagesToHide.length} old messages (total hidden: ${hiddenMessagesCount})`);
+}
+
+/**
+ * Create or update the "Show earlier messages" button
+ */
+function updateShowEarlierButton() {
+  const messagesDiv = document.getElementById('agentMessages');
+  if (!messagesDiv) return;
+  
+  // Remove existing button if any
+  const existingBtn = messagesDiv.querySelector('#showEarlierBtn');
+  if (existingBtn) existingBtn.remove();
+  
+  if (hiddenMessagesCount <= 0) return;
+  
+  // Create the button
+  const btnHtml = `
+    <div id="showEarlierBtn" class="flex justify-center py-2 mb-2">
+      <button onclick="expandEarlierMessages()" 
+              class="text-[11px] text-gray-500 hover:text-blue-600 flex items-center gap-1 px-3 py-1.5 bg-gray-50 hover:bg-blue-50 rounded-full border border-gray-200 hover:border-blue-200 transition-all">
+        <span>↑</span>
+        <span>Show ${hiddenMessagesCount} earlier message${hiddenMessagesCount > 1 ? 's' : ''}</span>
+      </button>
+    </div>
+  `;
+  
+  messagesDiv.insertAdjacentHTML('afterbegin', btnHtml);
+}
+
+/**
+ * Expand hidden messages (show earlier conversation)
+ * Shows messages in batches to avoid performance issues
+ */
+function expandEarlierMessages() {
+  const messagesDiv = document.getElementById('agentMessages');
+  if (!messagesDiv) return;
+  
+  // Find collapsed containers
+  const containers = messagesDiv.querySelectorAll('[data-collapsed-container="true"].hidden');
+  
+  if (containers.length === 0) {
+    hiddenMessagesCount = 0;
+    updateShowEarlierButton();
+    return;
+  }
+  
+  // Take the most recent collapsed container (last hidden one)
+  const containerToShow = containers[containers.length - 1];
+  
+  // Get messages in this container
+  const messages = containerToShow.querySelectorAll('[data-collapsed="true"]');
+  const shownCount = messages.length;
+  
+  // Show the container
+  containerToShow.classList.remove('hidden');
+  
+  // Remove collapsed attribute from messages
+  messages.forEach(msg => {
+    msg.removeAttribute('data-collapsed');
+  });
+  
+  // Unwrap messages from container (move them to parent)
+  while (containerToShow.firstChild) {
+    messagesDiv.insertBefore(containerToShow.firstChild, containerToShow);
+  }
+  containerToShow.remove();
+  
+  // Update count
+  hiddenMessagesCount = Math.max(0, hiddenMessagesCount - shownCount);
+  
+  // Update button
+  updateShowEarlierButton();
+  
+  console.log(`📖 Expanded ${shownCount} earlier messages (remaining hidden: ${hiddenMessagesCount})`);
+  
+  // Scroll to top to show the expanded messages
+  messagesDiv.scrollTop = 0;
+}
+
+/**
+ * Trim messages array to MEMORY_LIMIT
+ * Called before persisting to backend
+ * 
+ * IMPORTANT: This actually removes old messages from memory
+ * Only do this for memory/storage optimization, not DOM
+ */
+function trimMessagesForStorage() {
+  if (agentMessages.length <= CONVERSATION_LIMITS.MEMORY_LIMIT) return agentMessages;
+  
+  const trimCount = agentMessages.length - CONVERSATION_LIMITS.MEMORY_LIMIT;
+  
+  // Keep the most recent messages
+  const trimmed = agentMessages.slice(trimCount);
+  
+  console.log(`🗑️ Trimmed ${trimCount} old messages for storage (keeping ${trimmed.length})`);
+  
+  return trimmed;
+}
+
+/**
+ * Get visible message count in DOM
+ * Useful for debugging and UI feedback
+ */
+function getVisibleMessageCount() {
+  const messagesDiv = document.getElementById('agentMessages');
+  if (!messagesDiv) return 0;
+  
+  return messagesDiv.querySelectorAll('[data-type]:not([data-collapsed="true"])').length;
+}
+
+/**
+ * Start a new conversation - clears messages and resets state
+ * Allows user to start fresh without switching tabs
+ */
+function startNewConversation() {
+  // Log action event
+  logActionEvent('new_conversation', 'quick_action');
+  
+  // CRITICAL: Cleanup any active SSE connections and timers first
+  // This prevents resource leaks when starting new conversations
+  if (typeof cleanupActiveResources === 'function') {
+    cleanupActiveResources();
+  }
+  
+  // Clear stored conversation in backend
+  google.script.run
+    .withSuccessHandler(function() {
+      console.log('Conversation cleared from backend');
+    })
+    .withFailureHandler(function(err) {
+      console.warn('Failed to clear conversation:', err);
+    })
+    .clearConversation();
+  
+  // Clear the message area
+  const messagesDiv = document.getElementById('agentMessages');
+  if (messagesDiv) {
+    messagesDiv.innerHTML = '';
+  }
+  
+  // Clear the input
+  const input = document.getElementById('agentInput');
+  if (input) {
+    input.value = '';
+    input.focus();
+  }
+  
+  // Reset execution state
+  if (typeof currentPlan !== 'undefined') {
+    currentPlan = null;
+  }
+  if (typeof agentMessages !== 'undefined') {
+    agentMessages = [];
+  }
+  if (typeof setExecuting === 'function') {
+    setExecuting(false);
+  }
+  
+  // Reset conversation persistence state
+  hasStoredConversation = false;
+  storedConversation = null;
+  conversationRestored = false;
+  
+  // Reset hidden messages count (conversation limits)
+  hiddenMessagesCount = 0;
+  
+  // Reset user-edited range flag to allow auto-refresh
+  if (typeof userEditedRange !== 'undefined') {
+    userEditedRange = false;
+  }
+  
+  // Re-render welcome message and capture fresh selection
+  if (typeof renderWelcomeMessage === 'function') {
+    renderWelcomeMessage();
+  }
+  
+  // Show discovery tools again for new chat
+  const discoveryTools = document.getElementById('discoveryTools');
+  if (discoveryTools) discoveryTools.classList.remove('hidden');
+  
+  console.log('✨ New conversation started');
+  showToast('New chat started', 'success');
+}
+
+/**
+ * Restore a stored conversation
+ * Called when user clicks "Continue" on the restore prompt
+ */
+function restoreStoredConversation() {
+  if (!storedConversation) return;
+  
+  logActionEvent('restore_conversation', 'prompt');
+  
+  // Reset any stuck execution state from previous session
+  if (typeof isExecuting !== 'undefined') isExecuting = false;
+  if (typeof chainExecuting !== 'undefined') chainExecuting = false;
+  if (typeof setExecuting === 'function') setExecuting(false);
+  
+  // CRITICAL: Restore the plan from stored conversation (don't just clear it!)
+  if (storedConversation.currentTask) {
+    currentPlan = storedConversation.currentTask;
+    window.currentPlan = storedConversation.currentTask;  // Also set on window for validation
+    console.log('📋 Restored plan from conversation:', currentPlan);
+    
+    // Re-render the plan UI using showPlan (from Sidebar_Agent_Parsing.html)
+    if (typeof showPlan === 'function' && currentPlan.originalCommand) {
+      showPlan(currentPlan, currentPlan.originalCommand);
+    }
+  } else {
+    // No stored plan - clear it
+    if (typeof currentPlan !== 'undefined') currentPlan = null;
+    window.currentPlan = null;
+  }
+  
+  // Restore messages
+  agentMessages = storedConversation.messages || [];
+  conversationRestored = true;
+  
+  // Reset hidden messages count before restoring
+  hiddenMessagesCount = 0;
+  
+  // Render restored messages
+  const messagesDiv = document.getElementById('agentMessages');
+  if (messagesDiv) {
+    messagesDiv.innerHTML = '';
+    
+    // For large conversations, show info about collapsing
+    const totalMessages = agentMessages.length;
+    if (totalMessages > CONVERSATION_LIMITS.VISIBLE_LIMIT) {
+      console.log(`📦 Restoring ${totalMessages} messages - will auto-collapse older messages for performance`);
+    }
+    
+    // Hide discovery tools for restored conversations
+    const discoveryTools = document.getElementById('discoveryTools');
+    if (discoveryTools) discoveryTools.classList.add('hidden');
+    
+    // Add a context indicator
+    const contextInfo = document.createElement('div');
+    contextInfo.className = 'text-[11px] text-gray-400 text-center py-1 mb-2 border-b border-gray-100';
+    contextInfo.innerHTML = `📂 Conversation restored from ${storedConversation.sheetName || 'previous session'}`;
+    messagesDiv.appendChild(contextInfo);
+    
+    // Render each message using addAgentMessage
+    agentMessages.forEach(msg => {
+      // Use the stored type if available, otherwise derive from role
+      // Stored types: 'user', 'plan', 'complete', 'error', 'clarification', 'progress'
+      // If only role is available (legacy), derive: 'user' -> 'user', 'agent' -> 'complete'
+      let type = msg.type || (msg.role === 'user' ? 'user' : 'complete');
+      
+      // For non-renderable types, use a simple text display
+      if (!['user', 'thinking', 'plan', 'clarification', 'progress', 'complete', 'error'].includes(type)) {
+        type = 'complete';  // Fallback to complete style for agent messages
+      }
+      
+      // CRITICAL: For plan and clarification types, parse JSON content back to object
+      let content = msg.content;
+      if (type === 'plan' || type === 'clarification') {
+        try {
+          // If content is a JSON string, parse it back to object
+          if (typeof content === 'string' && (content.startsWith('{') || content.startsWith('['))) {
+            content = JSON.parse(content);
+            console.log(`📋 Parsed ${type} message content from JSON`);
+          }
+        } catch (e) {
+          console.warn(`Failed to parse ${type} message content:`, e);
+          // Keep original content if parsing fails
+        }
+      }
+      
+      // CRITICAL: For plan messages, also update currentPlan variable
+      // This is needed so the Run button and validation can access the plan data
+      if (type === 'plan' && typeof content === 'object') {
+        currentPlan = content;
+        window.currentPlan = content;  // Also set on window for validation
+        console.log('📋 Set currentPlan from restored message');
+      }
+      
+      addAgentMessage(type, content);
+    });
+  }
+  
+  // Hide the restore prompt
+  const restorePrompt = document.getElementById('conversationRestorePrompt');
+  if (restorePrompt) {
+    restorePrompt.remove();
+  }
+  
+  // Focus input and scroll to bottom
+  const input = document.getElementById('agentInput');
+  if (input) {
+    input.focus();
+    input.disabled = false;  // Ensure input is enabled
+  }
+  
+  // Auto-scroll to show input area
+  if (typeof autoScrollMessages === 'function') {
+    autoScrollMessages();
+  }
+  
+  // Update send button state
+  if (typeof updateSendButtonState === 'function') {
+    updateSendButtonState();
+  }
+  
+  // Show appropriate toast based on whether messages were collapsed
+  if (hiddenMessagesCount > 0) {
+    showToast(`Conversation restored (${hiddenMessagesCount} older messages collapsed)`, 'success');
+  } else {
+    showToast('Conversation restored', 'success');
+  }
+}
+
+/**
+ * Save current conversation to backend
+ * Called after each message exchange
+ * 
+ * PERFORMANCE OPTIMIZATION (2026-01-21):
+ * - Added debouncing to prevent rapid successive saves
+ * - Minimum 2 seconds between saves
+ * - Reduces API calls during chain execution
+ */
+let _lastConversationSave = 0;
+let _pendingConversationSave = null;
+
+function persistConversation() {
+  if (agentMessages.length === 0) return;
+  
+  const now = Date.now();
+  const MIN_SAVE_INTERVAL = 2000; // 2 seconds minimum between saves
+  
+  // If we saved recently, schedule a delayed save instead
+  if (now - _lastConversationSave < MIN_SAVE_INTERVAL) {
+    // Clear any pending save and schedule a new one
+    if (_pendingConversationSave) {
+      clearTimeout(_pendingConversationSave);
+    }
+    _pendingConversationSave = setTimeout(() => {
+      _pendingConversationSave = null;
+      persistConversation();
+    }, MIN_SAVE_INTERVAL - (now - _lastConversationSave));
+    return;
+  }
+  
+  _lastConversationSave = now;
+  const context = currentSelectionContext || {};
+  
+  // Trim messages to MEMORY_LIMIT before saving to reduce storage/bandwidth
+  // This keeps the most recent messages and discards oldest
+  const messagesToSave = typeof trimMessagesForStorage === 'function' 
+    ? trimMessagesForStorage() 
+    : agentMessages;
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      if (result.success) {
+        const savedCount = messagesToSave.length;
+        const totalCount = agentMessages.length;
+        const trimmedNote = savedCount < totalCount ? ` (trimmed from ${totalCount})` : '';
+        console.log(`💾 Conversation saved (${savedCount} messages${trimmedNote})`);
+      }
+    })
+    .withFailureHandler(function(err) {
+      console.warn('Failed to persist conversation:', err);
+    })
+    .saveConversation(messagesToSave, context, currentPlan);
+}
+
+/**
+ * Render the conversation restore prompt
+ * Shown when user has a stored conversation from previous session
+ */
+function renderConversationRestorePrompt() {
+  if (!hasStoredConversation || !storedConversation || conversationRestored) return null;
+  
+  const msgCount = storedConversation.messages?.length || 0;
+  const sheetName = storedConversation.sheetName || 'this spreadsheet';
+  const lastTime = storedConversation.lastInteraction 
+    ? formatRelativeTime(new Date(storedConversation.lastInteraction))
+    : 'recently';
+  
+  return `
+    <div id="conversationRestorePrompt" class="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-3">
+      <div class="flex items-start gap-2">
+        <span class="text-lg">💬</span>
+        <div class="flex-1">
+          <p class="text-sm font-medium text-blue-900 mb-1">Welcome back!</p>
+          <p class="text-xs text-blue-700 mb-2">
+            You have a conversation from ${lastTime} (${msgCount} messages) on "${sheetName}".
+          </p>
+          <div class="flex gap-2">
+            <button onclick="restoreStoredConversation()" 
+                    class="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 transition-colors">
+              Continue
+            </button>
+            <button onclick="dismissRestorePrompt()" 
+                    class="px-3 py-1 bg-white text-blue-600 text-xs rounded border border-blue-300 hover:bg-blue-50 transition-colors">
+              Start Fresh
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Dismiss the restore prompt and start fresh
+ */
+function dismissRestorePrompt() {
+  logActionEvent('dismiss_restore', 'prompt');
+  
+  const prompt = document.getElementById('conversationRestorePrompt');
+  if (prompt) prompt.remove();
+  
+  // Clear stored conversation in backend
+  google.script.run.clearConversation();
+  
+  hasStoredConversation = false;
+  storedConversation = null;
+}
+
+/**
+ * Format a date as relative time (e.g., "2 hours ago", "yesterday")
+ */
+function formatRelativeTime(date) {
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+  
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return diffMins + ' min ago';
+  if (diffHours < 24) return diffHours + ' hour' + (diffHours > 1 ? 's' : '') + ' ago';
+  if (diffDays === 1) return 'yesterday';
+  if (diffDays < 7) return diffDays + ' days ago';
+  return date.toLocaleDateString();
+}
+
+/**
+ * Toggle the quick actions dropdown menu
+ */
+function toggleQuickActionsDropdown(e) {
+  if (e) e.stopPropagation();
+  const menu = document.getElementById('quickActionsMenu');
+  if (!menu) return;
+  
+  const isHidden = menu.classList.contains('hidden');
+  
+  // Close all other dropdowns first
+  closeAllDropdowns();
+  
+  if (isHidden) {
+    menu.classList.remove('hidden');
+    // Close when clicking outside
+    setTimeout(() => {
+      document.addEventListener('click', closeQuickActionsOnOutsideClick);
+    }, 0);
+  }
+}
+
+function closeQuickActionsOnOutsideClick(e) {
+  const dropdown = document.getElementById('quickActionsDropdown');
+  if (dropdown && !dropdown.contains(e.target)) {
+    closeAllDropdowns();
+  }
+}
+
+function closeAllDropdowns() {
+  const menu = document.getElementById('quickActionsMenu');
+  if (menu) menu.classList.add('hidden');
+  document.removeEventListener('click', closeQuickActionsOnOutsideClick);
+}
+
+/**
+ * Select a quick action from the dropdown
+ */
+function selectQuickAction(action) {
+  closeAllDropdowns();
+  setQuickCommand(action);
+}
+
+function clearHistory() {
+  if (!confirm('Clear all task history?')) return;
+  
+  google.script.run
+    .withSuccessHandler(function() {
+      agentPrefs.recentTasks = [];
+      renderTaskHistory();
+      showToast('History cleared', 'success');
+    })
+    .withFailureHandler(function(err) {
+      showToast('Failed to clear history', 'error');
+    })
+    .clearTaskHistory();
+}
+
+console.log('📦 Agent Core module loaded');
+</script>

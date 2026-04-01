@@ -1,0 +1,283 @@
+<!--
+  @file Sidebar_Agent_TaskChain_Validation.html
+  @version 1.0.0
+  @created 2026-02-05
+  
+  TASK CHAIN - Validation Module
+  
+  Contains:
+  - Step validation
+  - Action normalization
+  - Description generation
+  
+  Depends on: Sidebar_Agent_TaskChain_State.html
+-->
+
+<script>
+// ============================================
+// STEP DESCRIPTION GENERATION
+// ============================================
+
+/**
+ * Generate meaningful step description based on action type and config
+ * @param {Object} step - Step object with action, config, options, etc.
+ * @param {number} idx - Step index (0-based)
+ * @returns {string} Human-readable description
+ */
+function generateStepDescription(step, idx) {
+  const action = step.action || 'process';
+  const config = step.config || {};
+  const options = config.options || step.options || step.formatOptions || {};
+  
+  switch (action) {
+    case 'format':
+      // Determine what kind of formatting
+      const formatParts = [];
+      if (options.bold) formatParts.push('bold');
+      if (options.italic) formatParts.push('italic');
+      if (options.backgroundColor) formatParts.push('background color');
+      if (options.textColor || options.fontColor) formatParts.push('text color');
+      if (options.fontSize) formatParts.push('font size');
+      if (config.formatType === 'currency' || options.numberFormat?.includes('$')) formatParts.push('currency');
+      if (config.formatType === 'percent') formatParts.push('percentage');
+      if (options.borders || config.addBorders) formatParts.push('borders');
+      
+      if (formatParts.length > 0) {
+        return `Apply ${formatParts.slice(0, 2).join(' & ')} formatting`;
+      }
+      // Check range for context
+      const range = config.range || step.range;
+      if (range && (range.includes('1:') || range?.endsWith('1'))) {
+        return 'Format header row';
+      }
+      return 'Apply cell formatting';
+      
+    case 'formula':
+      const formulaDesc = config.description || step.description;
+      if (formulaDesc && formulaDesc !== 'formula') return formulaDesc;
+      return 'Apply formula calculation';
+      
+    case 'chart':
+      const chartType = config.chartType || step.chartType || 'chart';
+      return `Create ${chartType} visualization`;
+      
+    case 'conditionalFormat':
+      return 'Apply conditional formatting rules';
+      
+    case 'dataValidation':
+      const valType = config.validationType || step.validationType;
+      if (valType === 'dropdown') return 'Add dropdown list';
+      if (valType === 'checkbox') return 'Add checkboxes';
+      return 'Add data validation';
+      
+    case 'filter':
+      const hasCriteria = (config.criteria || step.criteria || []).length > 0;
+      if (hasCriteria) return 'Apply filter criteria';
+      return 'Add filter dropdowns';
+      
+    case 'sheetOps':
+      const ops = config.operations || step.operations || [];
+      if (ops.length > 0) {
+        const firstOp = ops[0].operation || ops[0];
+        if (typeof firstOp === 'string') {
+          if (firstOp.includes('freeze')) return 'Freeze rows/columns';
+          if (firstOp.includes('sort')) return 'Sort data';
+          if (firstOp.includes('hide')) return 'Hide rows/columns';
+          if (firstOp.includes('protect')) return 'Protect range';
+        }
+      }
+      return 'Sheet operations';
+      
+    case 'writeData':
+      return 'Write data to cells';
+      
+    case 'table':
+      return 'Create formatted table';
+      
+    case 'analyze':
+      // Use the AI's question if available for a better description
+      if (config.question && config.question.length > 5 && config.question.length < 80) {
+        return config.question;
+      }
+      if (step.question && step.question.length > 5 && step.question.length < 80) {
+        return step.question;
+      }
+      // Try to extract the analyze-specific part from a multi-part prompt
+      // e.g., "Create chart AND tell me top 5 performers" → "Top 5 performers and their total bonus"
+      if (step.prompt && step.prompt.length > 10) {
+        const prompt = step.prompt;
+        // Look for "tell me", "show me", "find", "who are", "what are", "list" etc.
+        const analyzePatterns = [
+          /(?:tell\s+me|show\s+me|find|identify|list|who\s+are|what\s+are)\s+(.{10,70}?)(?:\.|$)/i,
+          /(?:and\s+)(?:tell\s+me|show\s+me|find|identify|list|who\s+are|what\s+are)\s+(.{10,70}?)(?:\.|$)/i
+        ];
+        for (const pattern of analyzePatterns) {
+          const match = prompt.match(pattern);
+          if (match && match[1]) {
+            // Capitalize first letter, clean up
+            let desc = match[1].trim().replace(/[,;]+$/, '');
+            desc = desc.charAt(0).toUpperCase() + desc.slice(1);
+            if (desc.length > 5 && desc.length < 80) return desc;
+          }
+        }
+        // Fallback: if prompt is short enough, use it directly
+        if (prompt.length < 60) return prompt;
+      }
+      return 'Analyze data patterns';
+      
+    case 'classify':
+      return 'Classify into categories';
+      
+    case 'extract':
+      return 'Extract information';
+      
+    case 'summarize':
+      return 'Generate summary';
+      
+    case 'translate':
+      return 'Translate content';
+      
+    case 'generate':
+      return 'Generate content';
+      
+    case 'clean':
+      return 'Clean and normalize data';
+      
+    case 'score':
+      return 'Calculate scores';
+      
+    case 'validate':
+      return 'Validate data';
+      
+    case 'rewrite':
+      return 'Rewrite content';
+      
+    default:
+      return `${action.charAt(0).toUpperCase() + action.slice(1)} data`;
+  }
+}
+
+// ============================================
+// STEP NORMALIZATION
+// ============================================
+
+/**
+ * Normalize and validate steps from AI response
+ * @param {Array} steps - Steps array from AI
+ * @returns {Object} { valid: boolean, steps: Array, reasons: Array }
+ */
+function normalizeAndValidateSteps(steps) {
+  if (!steps || !Array.isArray(steps) || steps.length === 0) {
+    return { valid: false, steps: [], reasons: ['No steps provided'] };
+  }
+  
+  const invalidReasons = [];
+  
+  // Normalize each step
+  steps.forEach((step, idx) => {
+    // Normalize action
+    if (step.action) {
+      console.log(`🔗 [TaskChain] Step ${idx + 1} raw action: "${step.action}"`);
+      const normalized = normalizeAction(step.action);
+      console.log(`🔗 [TaskChain] Step ${idx + 1} normalized action: "${normalized}"`);
+      if (normalized === null) {
+        console.log(`🔗 [TaskChain] Unknown action "${step.action}" → defaulting to "analyze"`);
+        step.action = 'analyze';
+      } else if (normalized !== step.action) {
+        console.log(`🔗 [TaskChain] Action normalized: "${step.action}" → "${normalized}"`);
+        step.action = normalized;
+      } else {
+        step.action = normalized;
+      }
+    } else {
+      step.action = 'analyze';
+    }
+    
+    // Generate meaningful description if needed
+    const needsBetterDescription = !step.description || 
+                                   step.description === step.action ||
+                                   step.description.length < 10 ||
+                                   step.description.toLowerCase().includes('step ');
+    
+    if (needsBetterDescription) {
+      step.description = generateStepDescription(step, idx);
+      console.log(`🔗 [TaskChain] Generated description for step ${idx + 1}: "${step.description}"`);
+    }
+    
+    // Truncate overly long descriptions
+    if (step.description && step.description.length > 100) {
+      const original = step.description;
+      step.description = generateStepDescription(step, idx);
+      console.log(`🔗 [TaskChain] Truncated description from ${original.length} chars to: "${step.description}"`);
+    }
+    
+    // Fix empty or too-short prompts (skip for sheet actions and formulas which may have short prompts)
+    const isSheetOrFormula = ['chart', 'format', 'conditionalFormat', 'dataValidation', 
+                              'filter', 'sheetOps', 'writeData', 'table', 'formula'].includes(step.action);
+    if (!isSheetOrFormula && (!step.prompt || step.prompt.length < 20)) {
+      step.prompt = step.prompt || `Process the input data using ${step.action} to produce meaningful output.`;
+      console.log(`🔗 [TaskChain] Fixed empty/short prompt for step ${idx + 1}`);
+    }
+  });
+  
+  // Validate normalized steps
+  const validSteps = steps.every((step, idx) => {
+    const hasValidAction = step.action && isValidAction(step.action);
+    const hasGoodDescription = step.description && step.description.length >= 5 && step.description.length <= 100;
+    // Sheet actions and formulas may have short/empty prompts - that's OK
+    const isSheetOrFormula = ['chart', 'format', 'conditionalFormat', 'dataValidation', 
+                              'filter', 'sheetOps', 'writeData', 'table', 'formula'].includes(step.action);
+    const hasPrompt = isSheetOrFormula || (step.prompt && step.prompt.length >= 20);
+    
+    if (!hasValidAction) {
+      invalidReasons.push(`Step ${idx + 1}: Invalid action "${step.action}"`);
+    }
+    if (!hasGoodDescription) {
+      invalidReasons.push(`Step ${idx + 1}: Bad description (len=${step.description?.length || 0})`);
+    }
+    if (!hasPrompt) {
+      invalidReasons.push(`Step ${idx + 1}: Missing/short prompt`);
+    }
+    
+    return hasValidAction && hasGoodDescription && hasPrompt;
+  });
+  
+  return { 
+    valid: validSteps || invalidReasons.length === 0, 
+    steps, 
+    reasons: invalidReasons 
+  };
+}
+
+/**
+ * Validate current plan before execution
+ * @returns {boolean} True if plan is valid
+ */
+function validateCurrentPlan() {
+  console.log('🔍 [Validation] currentPlan exists?', !!currentPlan);
+  if (currentPlan) {
+    console.log('🔍 [Validation] currentPlan.inputRange:', currentPlan.inputRange);
+    console.log('🔍 [Validation] currentPlan keys:', Object.keys(currentPlan));
+  }
+  
+  if (currentPlan && currentPlan.inputRange) {
+    console.log('✅ [Validation] Plan has inputRange, allowing execution');
+    return true;
+  }
+  
+  // Check if we have steps that don't need input (like writeData)
+  if (currentPlan && currentPlan.steps) {
+    const needsInput = currentPlan.steps.some(s => 
+      !['writeData', 'table'].includes(s.action)
+    );
+    if (!needsInput) {
+      console.log('✅ [Validation] Plan only has data creation steps, allowing execution');
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+console.log('📦 Agent TaskChain Validation module loaded');
+</script>

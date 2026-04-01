@@ -1,0 +1,1916 @@
+/**
+ * @file AgentSheetActions.gs
+ * @version 1.0.0
+ * @created 2026-01-28
+ * @author AISheeter Team
+ * 
+ * ============================================
+ * AGENT SHEET ACTIONS - Native Sheet Manipulation
+ * ============================================
+ * 
+ * Executes native Google Sheets operations INSTANTLY:
+ * - Charts (bar, column, line, pie, area, scatter)
+ * - Formatting (currency, percent, number, date, styles)
+ * - Conditional formatting (rules-based highlighting)
+ * - Data validation (dropdown, number, checkbox, etc.)
+ * - Filtering (criteria-based row filtering)
+ * 
+ * KEY: These actions do NOT use AI jobs - they execute immediately
+ * 
+ * IMPORTANT: This module does NOT touch:
+ * - Formula First logic (FormulaFirst.gs)
+ * - AI job creation (Agent.gs, Jobs.gs)
+ * - Multi-aspect handling (AgentTaskChain.gs)
+ * - Result writing (Jobs.gs writeJobResults)
+ */
+
+var AgentSheetActions = (function() {
+  
+  // Supported sheet action types
+  var SHEET_ACTIONS = ['chart', 'format', 'conditionalFormat', 'dataValidation', 'filter', 'writeData'];
+  
+  /**
+   * Check if action is a sheet action (not AI processing)
+   * @param {string} action - Action type
+   * @return {boolean}
+   */
+  function isSheetAction(action) {
+    return SHEET_ACTIONS.indexOf(action) !== -1;
+  }
+  
+  /**
+   * Execute a sheet action
+   * @param {Object} step - Step configuration from AI
+   * @return {Object} { success, result, instant: true } or { success: false, error }
+   */
+  function execute(step) {
+    var action = step.action;
+    Logger.log('[SheetActions] Executing: ' + action);
+    
+    try {
+      var result;
+      switch (action) {
+        case 'chart':
+          result = createChart(step);
+          break;
+        case 'format':
+          result = applyFormat(step);
+          break;
+        case 'conditionalFormat':
+          result = applyConditionalFormat(step);
+          break;
+        case 'dataValidation':
+          result = createValidation(step);
+          break;
+        case 'filter':
+          result = applyFilter(step);
+          break;
+        case 'writeData':
+          result = writeData(step);
+          break;
+        case 'createTable':
+          result = createTable(step);
+          break;
+        default:
+          return { success: false, error: 'Unknown sheet action: ' + action };
+      }
+      
+      Logger.log('[SheetActions] ✅ Completed: ' + action);
+      return {
+        success: true,
+        action: action,
+        result: result,
+        instant: true  // No polling needed - completed immediately
+      };
+    } catch (e) {
+      Logger.log('[SheetActions] ❌ Error: ' + e.message);
+      return { success: false, error: e.message };
+    }
+  }
+  
+  // ==================== CHART ====================
+  
+  // Default color palette - professional, accessible colors
+  var DEFAULT_COLORS = [
+    '#4285F4', // Google Blue
+    '#EA4335', // Google Red
+    '#FBBC04', // Google Yellow
+    '#34A853', // Google Green
+    '#FF6D01', // Orange
+    '#46BDC6', // Teal
+    '#7BAAF7', // Light Blue
+    '#F07B72', // Light Red
+    '#FCD04F', // Light Yellow
+    '#81C995'  // Light Green
+  ];
+  
+  /**
+   * Create a chart from data with full configuration
+   * @param {Object} step - { chartType, dataRange, config }
+   * 
+   * ============================================
+   * COMPREHENSIVE CONFIG OPTIONS
+   * ============================================
+   * 
+   * COMMON OPTIONS (all chart types):
+   * - title: Chart title text
+   * - seriesNames: Array of legend labels for each data series
+   * - colors: Array of hex colors for each series (or use defaults)
+   * - legendPosition: 'right', 'bottom', 'top', 'left', 'in', 'none'
+   * - width, height: Chart dimensions in pixels (default 600x400)
+   * - backgroundColor: Chart background color
+   * - fontName: Font family for all text
+   * 
+   * BAR/COLUMN CHART OPTIONS:
+   * - stacked: boolean - Stack bars/columns
+   * - stackedPercent: boolean - Stack as 100% (percentage)
+   * - showDataLabels: boolean - Show values on bars
+   * - barGroupWidth: string - Width of bar groups (e.g., '75%')
+   * - orientation: 'horizontal' or 'vertical'
+   * 
+   * LINE CHART OPTIONS:
+   * - curveType: 'none' (straight) or 'function' (smooth curves)
+   * - lineWidth: number - Thickness of lines (default 2)
+   * - pointSize: number - Size of data points (0 = no points)
+   * - pointShape: 'circle', 'triangle', 'square', 'diamond', 'star', 'polygon'
+   * - interpolateNulls: boolean - Connect line through null points
+   * - lineDashStyle: Array - Dash pattern e.g., [4, 4] for dashed
+   * 
+   * AREA CHART OPTIONS:
+   * - areaOpacity: number 0-1 - Transparency of fill (default 0.3)
+   * - stacked: boolean - Stack areas
+   * - lineWidth: number - Border line thickness
+   * 
+   * PIE/DONUT CHART OPTIONS:
+   * - pieHole: number 0-1 - Size of hole for donut (0 = pie, 0.4 = donut)
+   * - pieSliceText: 'percentage', 'value', 'label', 'none'
+   * - pieSliceBorderColor: Slice border color
+   * - pieStartAngle: number - Starting angle in degrees
+   * - is3D: boolean - 3D pie chart
+   * - sliceVisibilityThreshold: number - Hide slices below this %
+   * 
+   * SCATTER CHART OPTIONS:
+   * - pointSize: number - Size of points (default 7)
+   * - pointShape: 'circle', 'triangle', 'square', 'diamond', 'star'
+   * - trendlines: boolean - Add linear trendline
+   * - trendlineColor: Trendline color
+   * - trendlineOpacity: number 0-1
+   * 
+   * AXIS OPTIONS (bar, column, line, area, scatter):
+   * - xAxisTitle: Title for X-axis
+   * - yAxisTitle: Title for Y-axis
+   * - xAxisFormat: Number format for X-axis
+   * - yAxisFormat: Number format for Y-axis ('short', 'decimal', 'percent', 'currency')
+   * - xAxisMin, xAxisMax: Axis range
+   * - yAxisMin, yAxisMax: Axis range
+   * - gridlines: boolean - Show gridlines (default true)
+   * - gridlineColor: Color of gridlines
+   */
+  function createChart(step) {
+    var sheet = SpreadsheetApp.getActiveSheet();
+    var config = step.config || {};
+    
+    Logger.log('[SheetActions:Chart] Config received: ' + JSON.stringify(config).substring(0, 500));
+    
+    // NEW APPROACH: AI provides columns, frontend detects full data range
+    // This follows the principle: AI decides WHAT, frontend handles ALL data
+    var rangeStr = buildDataRangeFromColumns(sheet, config, step);
+    var dataRange = sheet.getRange(rangeStr);
+    
+    Logger.log('[SheetActions:Chart] ✅ Final range (all data): ' + rangeStr);
+    
+    // Determine chart type
+    var chartType = (config.chartType || step.chartType || 'column').toLowerCase();
+    
+    // Chart dimensions (reasonable defaults, larger for pie)
+    var defaultWidth = chartType === 'pie' ? 500 : 600;
+    var defaultHeight = chartType === 'pie' ? 400 : 400;
+    var chartWidth = config.width || defaultWidth;
+    var chartHeight = config.height || defaultHeight;
+    
+    // Position: place chart to the right of data, or at specified position
+    var posRow = config.positionRow || 2;
+    var posCol = config.positionColumn || (dataRange.getLastColumn() + 2);
+    
+    // Build chart
+    var chartBuilder = sheet.newChart()
+      .setChartType(getChartType(chartType))
+      .addRange(dataRange)
+      .setPosition(posRow, posCol, 0, 0);
+    
+    // Set chart dimensions for better visibility
+    chartBuilder.setOption('width', chartWidth);
+    chartBuilder.setOption('height', chartHeight);
+    
+    // ===== TITLE =====
+    if (config.title) {
+      chartBuilder.setOption('title', config.title);
+      chartBuilder.setOption('titleTextStyle', { 
+        fontSize: 16, 
+        bold: true,
+        color: config.titleColor || '#333333'
+      });
+    }
+    
+    // Font family
+    if (config.fontName) {
+      chartBuilder.setOption('fontName', config.fontName);
+    }
+    
+    // ===== COLORS =====
+    // Apply color palette (custom or default)
+    var colors = config.colors || DEFAULT_COLORS;
+    chartBuilder.setOption('colors', colors);
+    
+    // ===== LEGEND =====
+    // Trust AI's legendPosition decision - it knows the context
+    var legendPosition = config.legendPosition || 'top';  // Simple fallback only
+    chartBuilder.setOption('legend', { 
+      position: legendPosition,
+      textStyle: { fontSize: 12, color: '#666666' },
+      alignment: 'center'
+    });
+    
+    // ===== SERIES CONFIGURATION =====
+    if (config.seriesNames && config.seriesNames.length > 0) {
+      var seriesConfig = {};
+      config.seriesNames.forEach(function(name, idx) {
+        seriesConfig[idx] = { 
+          labelInLegend: name
+        };
+        // Apply custom colors per series if provided
+        if (config.colors && config.colors[idx]) {
+          seriesConfig[idx].color = config.colors[idx];
+        }
+      });
+      chartBuilder.setOption('series', seriesConfig);
+      Logger.log('[SheetActions:Chart] Series names: ' + config.seriesNames.join(', '));
+    }
+    
+    // ===== CHART-TYPE SPECIFIC OPTIONS =====
+    
+    if (chartType === 'pie') {
+      // ========== PIE / DONUT CHART ==========
+      applyPieChartOptions(chartBuilder, config);
+      
+    } else if (chartType === 'line') {
+      // ========== LINE CHART ==========
+      applyLineChartOptions(chartBuilder, config, dataRange);
+      applyAxisOptions(chartBuilder, config, dataRange);
+      
+    } else if (chartType === 'area') {
+      // ========== AREA CHART ==========
+      applyAreaChartOptions(chartBuilder, config);
+      applyAxisOptions(chartBuilder, config, dataRange);
+      
+    } else if (chartType === 'scatter') {
+      // ========== SCATTER CHART ==========
+      applyScatterChartOptions(chartBuilder, config);
+      applyAxisOptions(chartBuilder, config, dataRange);
+      
+    } else if (chartType === 'bar' || chartType === 'column') {
+      // ========== BAR / COLUMN CHART ==========
+      applyBarColumnChartOptions(chartBuilder, config, chartType);
+      applyAxisOptions(chartBuilder, config, dataRange);
+    }
+    
+    // ===== COMMON OPTIONS =====
+    
+    // Tooltip configuration
+    chartBuilder.setOption('tooltip', { 
+      showColorCode: true,
+      textStyle: { fontSize: 12 },
+      trigger: config.tooltipTrigger || 'focus'
+    });
+    
+    // Background color
+    if (config.backgroundColor) {
+      chartBuilder.setOption('backgroundColor', { fill: config.backgroundColor });
+    }
+    
+    // Chart area padding
+    chartBuilder.setOption('chartArea', {
+      left: config.chartAreaLeft || '10%',
+      top: config.chartAreaTop || '15%',
+      width: config.chartAreaWidth || '75%',
+      height: config.chartAreaHeight || '70%'
+    });
+    
+    // Animation
+    chartBuilder.setOption('animation', {
+      startup: true,
+      duration: 500,
+      easing: 'out'
+    });
+    
+    // Build and insert
+    var chart = chartBuilder.build();
+    sheet.insertChart(chart);
+    
+    Logger.log('[SheetActions:Chart] ✅ ' + chartType.toUpperCase() + ' chart created with ' + 
+               (config.seriesNames ? config.seriesNames.length : 'auto-detected') + ' series');
+    
+    return { 
+      chartType: chartType, 
+      range: rangeStr,
+      title: config.title || 'Chart',
+      series: config.seriesNames || [],
+      dimensions: { width: chartWidth, height: chartHeight }
+    };
+  }
+  
+  /**
+   * Apply PIE/DONUT chart specific options
+   */
+  function applyPieChartOptions(chartBuilder, config) {
+    // Donut hole (0 = pie, 0.4 = nice donut)
+    if (config.pieHole !== undefined) {
+      chartBuilder.setOption('pieHole', config.pieHole);
+    } else if (config.donut) {
+      chartBuilder.setOption('pieHole', 0.4);
+    }
+    
+    // Slice text - what to show on each slice (AI decides based on data)
+    // Options: "percentage", "value", "label", "none"
+    if (config.pieSliceText) {
+      chartBuilder.setOption('pieSliceText', config.pieSliceText);
+    }
+    // No default - let Google Charts use its default if AI didn't specify
+    chartBuilder.setOption('pieSliceTextStyle', {
+      fontSize: 12,
+      color: config.pieSliceTextColor || '#ffffff',
+      bold: true
+    });
+    
+    // Slice border
+    if (config.pieSliceBorderColor) {
+      chartBuilder.setOption('pieSliceBorderColor', config.pieSliceBorderColor);
+    }
+    
+    // Starting angle (default 0 = 3 o'clock position)
+    if (config.pieStartAngle !== undefined) {
+      chartBuilder.setOption('pieStartAngle', config.pieStartAngle);
+    }
+    
+    // 3D effect
+    if (config.is3D) {
+      chartBuilder.setOption('is3D', true);
+    }
+    
+    // Hide small slices
+    if (config.sliceVisibilityThreshold) {
+      chartBuilder.setOption('sliceVisibilityThreshold', config.sliceVisibilityThreshold);
+    }
+    
+    // Individual slice configuration
+    if (config.slices) {
+      chartBuilder.setOption('slices', config.slices);
+    }
+    
+    Logger.log('[SheetActions:Chart] Pie options applied: hole=' + (config.pieHole || 0) + 
+               ', text=' + (config.pieSliceText || 'default'));
+  }
+  
+  /**
+   * Apply LINE chart specific options
+   */
+  function applyLineChartOptions(chartBuilder, config, dataRange) {
+    // Curve type: 'none' for straight lines, 'function' for smooth curves
+    // Map common aliases to Google Charts values
+    var curveType = config.curveType || 'none';
+    if (curveType === 'smooth' || curveType === 'curved' || curveType === 'spline') {
+      curveType = 'function';  // Google Charts uses 'function' for smooth curves
+    }
+    chartBuilder.setOption('curveType', curveType);
+    Logger.log('[SheetActions:Chart] Line curveType: ' + curveType);
+    
+    // Line width
+    var lineWidth = config.lineWidth !== undefined ? config.lineWidth : 2;
+    chartBuilder.setOption('lineWidth', lineWidth);
+    
+    // Point size - trust AI's decision based on data density
+    // AI should specify: 3-5 (dense data), 7-10 (sparse data)
+    var pointSize = config.pointSize !== undefined ? config.pointSize : 5;  // Simple fallback
+    chartBuilder.setOption('pointSize', pointSize);
+    
+    // Point shape
+    if (config.pointShape) {
+      chartBuilder.setOption('pointShape', config.pointShape);
+    }
+    
+    // Handle null values
+    if (config.interpolateNulls) {
+      chartBuilder.setOption('interpolateNulls', true);
+    }
+    
+    // Series-specific line styles (for different dash patterns, etc.)
+    if (config.lineDashStyle) {
+      // Apply to all series
+      var numSeries = dataRange.getNumColumns() - 1;
+      var seriesConfig = {};
+      for (var i = 0; i < numSeries; i++) {
+        seriesConfig[i] = { lineDashStyle: config.lineDashStyle };
+      }
+      chartBuilder.setOption('series', seriesConfig);
+    }
+    
+    // Focus on data point on hover
+    chartBuilder.setOption('focusTarget', config.focusTarget || 'datum');
+    
+    // Crosshair on hover
+    if (config.crosshair) {
+      chartBuilder.setOption('crosshair', {
+        trigger: 'both',
+        orientation: 'both',
+        color: '#cccccc',
+        opacity: 0.7
+      });
+    }
+    
+    // Use first column as domain (categories)
+    chartBuilder.setOption('useFirstColumnAsDomain', true);
+    
+    Logger.log('[SheetActions:Chart] Line options: curve=' + curveType + 
+               ', lineWidth=' + lineWidth + ', pointSize=' + pointSize);
+  }
+  
+  /**
+   * Apply AREA chart specific options
+   */
+  function applyAreaChartOptions(chartBuilder, config) {
+    // Area opacity (fill transparency)
+    var areaOpacity = config.areaOpacity !== undefined ? config.areaOpacity : 0.3;
+    chartBuilder.setOption('areaOpacity', areaOpacity);
+    
+    // Stacked area
+    if (config.stacked) {
+      chartBuilder.setOption('isStacked', true);
+    }
+    if (config.stackedPercent) {
+      chartBuilder.setOption('isStacked', 'percent');
+    }
+    
+    // Line width for area border
+    var lineWidth = config.lineWidth !== undefined ? config.lineWidth : 2;
+    chartBuilder.setOption('lineWidth', lineWidth);
+    
+    // Point size
+    if (config.pointSize !== undefined) {
+      chartBuilder.setOption('pointSize', config.pointSize);
+    }
+    
+    // Use first column as domain
+    chartBuilder.setOption('useFirstColumnAsDomain', true);
+    
+    // Focus target
+    chartBuilder.setOption('focusTarget', config.focusTarget || 'category');
+    
+    Logger.log('[SheetActions:Chart] Area options: opacity=' + areaOpacity + 
+               ', stacked=' + (config.stacked || false));
+  }
+  
+  /**
+   * Apply SCATTER chart specific options
+   */
+  function applyScatterChartOptions(chartBuilder, config) {
+    // Point size
+    var pointSize = config.pointSize !== undefined ? config.pointSize : 7;
+    chartBuilder.setOption('pointSize', pointSize);
+    
+    // Point shape
+    var pointShape = config.pointShape || 'circle';
+    chartBuilder.setOption('pointShape', pointShape);
+    
+    // No lines connecting points (it's a scatter chart)
+    chartBuilder.setOption('lineWidth', 0);
+    
+    // Trendlines - supports array for multiple series or boolean/object for single
+    if (config.trendlines || config.trendline) {
+      var trendlineConfig = {};
+      
+      // Check if trendlines is an array (multiple series)
+      if (Array.isArray(config.trendlines)) {
+        // Apply trendline config as provided by AI
+        config.trendlines.forEach(function(tl, idx) {
+          var seriesIndex = tl.series !== undefined ? tl.series : idx;
+          
+          trendlineConfig[seriesIndex] = {
+            type: tl.type || 'linear',
+            color: tl.color || DEFAULT_COLORS[seriesIndex % DEFAULT_COLORS.length],
+            lineWidth: tl.lineWidth || 2,
+            opacity: tl.opacity || 0.6,
+            showR2: tl.showR2 || false,
+            visibleInLegend: tl.visibleInLegend !== false,
+            labelInLegend: tl.labelInLegend
+          };
+          Logger.log('[SheetActions:Chart] Trendline ' + seriesIndex + ': "' + tl.labelInLegend + '"');
+        });
+      } else {
+        // Legacy: boolean or single trendline config
+        trendlineConfig = {
+          0: {
+            type: config.trendlineType || 'linear',
+            color: config.trendlineColor || '#888888',
+            lineWidth: config.trendlineWidth || 2,
+            opacity: config.trendlineOpacity || 0.5,
+            showR2: config.showR2 || false,
+            visibleInLegend: config.trendlineInLegend !== false
+          }
+        };
+        Logger.log('[SheetActions:Chart] Single trendline added: ' + (config.trendlineType || 'linear'));
+      }
+      
+      chartBuilder.setOption('trendlines', trendlineConfig);
+    }
+    
+    // Aggregate duplicate points
+    if (config.aggregationTarget) {
+      chartBuilder.setOption('aggregationTarget', config.aggregationTarget);
+    }
+    
+    // Crosshair
+    if (config.crosshair !== false) {
+      chartBuilder.setOption('crosshair', {
+        trigger: 'both',
+        orientation: 'both',
+        color: '#dddddd',
+        opacity: 0.5
+      });
+    }
+    
+    Logger.log('[SheetActions:Chart] Scatter options: pointSize=' + pointSize + 
+               ', shape=' + pointShape);
+  }
+  
+  /**
+   * Apply BAR/COLUMN chart specific options
+   */
+  function applyBarColumnChartOptions(chartBuilder, config, chartType) {
+    // Stacked bars/columns
+    if (config.stacked) {
+      chartBuilder.setOption('isStacked', true);
+    }
+    if (config.stackedPercent) {
+      chartBuilder.setOption('isStacked', 'percent');
+    }
+    
+    // Bar/column width - trust AI's decision based on number of bars
+    // AI should specify: "50%" (many bars), "75%" (default), "90%" (few bars)
+    var barWidth = config.barGroupWidth || '75%';  // Simple fallback
+    chartBuilder.setOption('bar', { groupWidth: barWidth });
+    
+    // Data labels on bars
+    if (config.showDataLabels) {
+      chartBuilder.setOption('annotations', {
+        alwaysOutside: true,
+        textStyle: { 
+          fontSize: 10,
+          color: '#333333',
+          auraColor: 'none'
+        },
+        stem: { color: 'transparent', length: 0 }
+      });
+    }
+    
+    // Use first column as domain
+    chartBuilder.setOption('useFirstColumnAsDomain', true);
+    
+    // Focus target
+    chartBuilder.setOption('focusTarget', config.focusTarget || 'category');
+    
+    Logger.log('[SheetActions:Chart] ' + chartType + ' options: stacked=' + 
+               (config.stacked || false) + ', labels=' + (config.showDataLabels || false));
+  }
+  
+  /**
+   * Apply AXIS options (common for bar, column, line, area, scatter)
+   */
+  function applyAxisOptions(chartBuilder, config, dataRange) {
+    // ===== HORIZONTAL AXIS (X-axis) =====
+    var hAxisConfig = {
+      textStyle: { fontSize: 11, color: '#666666' },
+      titleTextStyle: { fontSize: 12, italic: true, color: '#333333' }
+    };
+    
+    if (config.xAxisTitle) {
+      hAxisConfig.title = config.xAxisTitle;
+    }
+    
+    // Format for X-axis values
+    if (config.xAxisFormat) {
+      hAxisConfig.format = config.xAxisFormat;
+    }
+    
+    // X-axis range
+    if (config.xAxisMin !== undefined) {
+      hAxisConfig.minValue = config.xAxisMin;
+    }
+    if (config.xAxisMax !== undefined) {
+      hAxisConfig.maxValue = config.xAxisMax;
+    }
+    
+    // Slant/rotate labels - trust AI's decision if provided
+    if (config.slantedTextAngle) {
+      hAxisConfig.slantedText = true;
+      hAxisConfig.slantedTextAngle = config.slantedTextAngle;
+    } else if (dataRange.getNumRows() > 8) {
+      // Simple fallback: slant if many rows
+      hAxisConfig.slantedText = true;
+      hAxisConfig.slantedTextAngle = 45;
+    }
+    
+    // Font size for many labels
+    if (dataRange.getNumRows() > 12) {
+      hAxisConfig.textStyle = { fontSize: 10, color: '#666666' };
+    }
+    
+    // Gridlines
+    if (config.gridlines !== false) {
+      hAxisConfig.gridlines = { 
+        color: config.gridlineColor || '#f0f0f0',
+        count: config.xGridlineCount || -1  // -1 = auto
+      };
+    }
+    
+    chartBuilder.setOption('hAxis', hAxisConfig);
+    
+    // ===== VERTICAL AXIS (Y-axis) =====
+    var vAxisConfig = {
+      textStyle: { fontSize: 11, color: '#666666' },
+      titleTextStyle: { fontSize: 12, italic: true, color: '#333333' }
+    };
+    
+    if (config.yAxisTitle) {
+      vAxisConfig.title = config.yAxisTitle;
+    }
+    
+    // Format for Y-axis values - trust AI's decision
+    // AI should specify: "currency", "percent", "decimal", or "short"
+    if (config.yAxisFormat || config.valueFormat) {
+      vAxisConfig.format = config.yAxisFormat || config.valueFormat;
+    }
+    // No default - let Google Charts auto-detect if AI didn't specify
+    
+    // Y-axis range
+    if (config.yAxisMin !== undefined) {
+      vAxisConfig.minValue = config.yAxisMin;
+    }
+    if (config.yAxisMax !== undefined) {
+      vAxisConfig.maxValue = config.yAxisMax;
+    }
+    
+    // Gridlines
+    if (config.gridlines !== false) {
+      vAxisConfig.gridlines = { 
+        color: config.gridlineColor || '#f0f0f0',
+        count: config.yGridlineCount || 5
+      };
+      vAxisConfig.minorGridlines = {
+        color: config.minorGridlineColor || '#f8f8f8',
+        count: config.minorGridlineCount || 0
+      };
+    }
+    
+    // Baseline (where the axis starts)
+    if (config.baseline !== undefined) {
+      vAxisConfig.baseline = config.baseline;
+    }
+    
+    chartBuilder.setOption('vAxis', vAxisConfig);
+    
+    Logger.log('[SheetActions:Chart] Axes configured: x="' + (config.xAxisTitle || 'auto') + 
+               '", y="' + (config.yAxisTitle || 'auto') + '"');
+  }
+  
+  /**
+   * Map chart type string to Google Charts enum
+   */
+  function getChartType(type) {
+    var types = {
+      'bar': Charts.ChartType.BAR,
+      'column': Charts.ChartType.COLUMN,
+      'line': Charts.ChartType.LINE,
+      'pie': Charts.ChartType.PIE,
+      'area': Charts.ChartType.AREA,
+      'scatter': Charts.ChartType.SCATTER,
+      'combo': Charts.ChartType.COMBO,
+      'histogram': Charts.ChartType.HISTOGRAM,
+      'stepped': Charts.ChartType.STEPPED_AREA,
+      'steppedarea': Charts.ChartType.STEPPED_AREA
+    };
+    return types[type] || Charts.ChartType.COLUMN;
+  }
+  
+  // ==================== FORMAT ====================
+  
+  /**
+   * Apply number/style formatting to a range (or multiple comma-separated ranges)
+   * Supports:
+   * - Single operation: { formatType, range, options }
+   * - Multiple operations: { operations: [{ range, formatting }, ...] } (AI's flexible format)
+   * 
+   * @param {Object} step - { formatType, range, config }
+   */
+  function applyFormat(step) {
+    var sheet = SpreadsheetApp.getActiveSheet();
+    var config = step.config || {};
+    var results = [];
+    
+    // Check if we have multiple operations (AI's flexible format)
+    var operations = config.operations || [];
+    
+    if (operations.length > 0) {
+      // Handle multiple operations
+      Logger.log('[AgentSheetActions] applyFormat: processing ' + operations.length + ' operation(s)');
+      
+      for (var idx = 0; idx < operations.length; idx++) {
+        var op = operations[idx];
+        var opRange = op.range;
+        var formatting = op.formatting || {};
+        
+        if (!opRange) {
+          Logger.log('[AgentSheetActions] applyFormat: skipping operation ' + idx + ' - no range specified');
+          continue;
+        }
+        
+        try {
+          var range = sheet.getRange(opRange);
+          
+          // Apply formatting from the operation
+          if (formatting.bold) range.setFontWeight('bold');
+          if (formatting.italic) range.setFontStyle('italic');
+          if (formatting.underline) range.setFontLine('underline');
+          if (formatting.backgroundColor || formatting.background) {
+            range.setBackground(formatting.backgroundColor || formatting.background);
+          }
+          if (formatting.textColor || formatting.fontColor || formatting.color) {
+            range.setFontColor(formatting.textColor || formatting.fontColor || formatting.color);
+          }
+          if (formatting.fontSize) range.setFontSize(formatting.fontSize);
+          if (formatting.fontFamily) range.setFontFamily(formatting.fontFamily);
+          if (formatting.horizontalAlignment || formatting.alignment) {
+            range.setHorizontalAlignment(formatting.horizontalAlignment || formatting.alignment);
+          }
+          if (formatting.verticalAlignment) range.setVerticalAlignment(formatting.verticalAlignment);
+          if (formatting.wrap) range.setWrap(formatting.wrap);
+          
+          // Handle borders
+          if (formatting.borders || op.borders) {
+            range.setBorder(true, true, true, true, true, true);
+          }
+          
+          Logger.log('[AgentSheetActions] applyFormat: completed operation ' + idx + ' on range ' + opRange);
+          results.push({ range: opRange, success: true });
+        } catch (e) {
+          Logger.log('[AgentSheetActions] applyFormat: error in operation ' + idx + ' on range ' + opRange + ': ' + e.message);
+          results.push({ range: opRange, success: false, error: e.message });
+        }
+      }
+      
+      return { operationCount: operations.length, results: results };
+    }
+    
+    // Fallback to single operation format
+    var rangeStr = config.range || step.range || step.inputRange;
+    var formatType = config.formatType || step.formatType;
+    var options = config.options || step.options || {};
+    
+    // Handle multiple comma-separated ranges (e.g., "C4:C11,G4:G11,H4:H11")
+    var rangeStrings = rangeStr.split(',').map(function(r) { return r.trim(); }).filter(Boolean);
+    Logger.log('[AgentSheetActions] applyFormat: processing ' + rangeStrings.length + ' range(s): ' + rangeStrings.join(', '));
+    
+    rangeStrings.forEach(function(singleRangeStr) {
+      try {
+        var range = sheet.getRange(singleRangeStr);
+        
+        // Number/date formatting
+        if (formatType && formatType !== 'text') {
+          range.setNumberFormat(getNumberFormat(formatType, options));
+        }
+        
+        // Style formatting
+        if (options.bold) range.setFontWeight('bold');
+        if (options.italic) range.setFontStyle('italic');
+        if (options.underline) range.setFontLine('underline');
+        if (options.backgroundColor) range.setBackground(options.backgroundColor);
+        if (options.textColor || options.fontColor) range.setFontColor(options.textColor || options.fontColor);
+        if (options.fontSize) range.setFontSize(options.fontSize);
+        if (options.fontFamily) range.setFontFamily(options.fontFamily);
+        if (options.align || options.alignment) range.setHorizontalAlignment(options.align || options.alignment);
+        if (options.verticalAlign) range.setVerticalAlignment(options.verticalAlign);
+        if (options.wrap) range.setWrap(options.wrap);
+        if (options.borders) {
+          range.setBorder(true, true, true, true, true, true);
+        }
+        
+        Logger.log('[AgentSheetActions] applyFormat: successfully formatted range ' + singleRangeStr);
+      } catch (e) {
+        Logger.log('[AgentSheetActions] applyFormat: error formatting range ' + singleRangeStr + ': ' + e.message);
+        throw new Error('Failed to format range ' + singleRangeStr + ': ' + e.message);
+      }
+    });
+    
+    return { formatType: formatType, range: rangeStr, rangeCount: rangeStrings.length };
+  }
+  
+  /**
+   * Build number format string from type and options
+   */
+  function getNumberFormat(type, options) {
+    options = options || {};
+    var decimals = options.decimals !== undefined ? options.decimals : 2;
+    var decimalStr = decimals > 0 ? '.' + '0'.repeat(decimals) : '';
+    
+    // For date formatting, check both 'pattern' (from AI) and 'dateFormat' (legacy)
+    var dateFormat = options.pattern || options.dateFormat || 'yyyy-mm-dd';
+    
+    // Currency symbol handling - support multiple currencies
+    var currencyFormat = '$#,##0' + decimalStr; // Default USD
+    var locale = (options.locale || options.currency || '').toUpperCase();
+    
+    var currencySymbols = {
+      'EUR': '€#,##0' + decimalStr,
+      'GBP': '£#,##0' + decimalStr,
+      'JPY': '¥#,##0',  // JPY typically no decimals
+      'CNY': '¥#,##0' + decimalStr,
+      'KRW': '₩#,##0',  // KRW typically no decimals
+      'INR': '₹#,##0' + decimalStr,
+      'RUB': '₽#,##0' + decimalStr,
+      'BRL': 'R$#,##0' + decimalStr,
+      'CAD': 'CA$#,##0' + decimalStr,
+      'AUD': 'A$#,##0' + decimalStr,
+      'CHF': 'CHF #,##0' + decimalStr,
+      'USD': '$#,##0' + decimalStr
+    };
+    
+    if (locale && currencySymbols[locale]) {
+      currencyFormat = currencySymbols[locale];
+    } else if (options.symbol) {
+      // AI might provide a custom symbol
+      currencyFormat = options.symbol + '#,##0' + decimalStr;
+    }
+    
+    Logger.log('[AgentSheetActions] getNumberFormat: type=' + type + ', dateFormat=' + dateFormat + ', decimals=' + decimals + ', locale=' + locale);
+    
+    var formats = {
+      'currency': currencyFormat,
+      'percent': '0' + decimalStr + '%',
+      'percentage': '0' + decimalStr + '%',  // Alias
+      'number': '#,##0' + decimalStr,
+      'integer': '#,##0',  // No decimals
+      'decimal': '#,##0' + decimalStr,  // Alias
+      'date': dateFormat,
+      'datetime': options.pattern || 'yyyy-mm-dd hh:mm:ss',
+      'time': options.pattern || 'hh:mm:ss',
+      'text': '@',
+      'plain': '@'  // Alias
+    };
+    
+    // Normalize type to lowercase
+    var normalizedType = (type || '').toLowerCase();
+    return formats[normalizedType] || '@';
+  }
+  
+  // ==================== CONDITIONAL FORMAT ====================
+  
+  /**
+   * Apply conditional formatting rules (supports comma-separated ranges)
+   * @param {Object} step - { range, config: { rules: [] } }
+   */
+  function applyConditionalFormat(step) {
+    var sheet = SpreadsheetApp.getActiveSheet();
+    var config = step.config || {};
+    
+    var rangeStr = config.range || step.range || step.inputRange;
+    var rules = config.rules || step.rules || [];
+    var builtRules = [];
+    
+    // Handle multiple comma-separated ranges
+    var rangeStrings = rangeStr.split(',').map(function(r) { return r.trim(); }).filter(Boolean);
+    Logger.log('[AgentSheetActions] applyConditionalFormat: processing ' + rangeStrings.length + ' range(s)');
+    
+    rangeStrings.forEach(function(singleRangeStr) {
+      var range = sheet.getRange(singleRangeStr);
+      
+      rules.forEach(function(rule) {
+        var builder = SpreadsheetApp.newConditionalFormatRule().setRanges([range]);
+        
+        // Apply condition - support many variants AI might return
+        var condition = (rule.condition || '').toLowerCase().replace(/[_\s]/g, '');
+        var value = rule.value;
+        
+        switch (condition) {
+          case 'greaterthan':
+          case 'gt':
+            builder.whenNumberGreaterThan(value);
+            break;
+          case 'greaterthanorequal':
+          case 'greaterthanorequalto':
+          case 'gte':
+            builder.whenNumberGreaterThanOrEqualTo(value);
+            break;
+          case 'lessthan':
+          case 'lt':
+            builder.whenNumberLessThan(value);
+            break;
+          case 'lessthanorequal':
+          case 'lessthanorequalto':
+          case 'lte':
+            builder.whenNumberLessThanOrEqualTo(value);
+            break;
+          case 'equals':
+          case 'equal':
+          case 'eq':
+            if (typeof value === 'number') {
+              builder.whenNumberEqualTo(value);
+            } else {
+              builder.whenTextEqualTo(String(value));
+            }
+            break;
+          case 'notequals':
+          case 'notequal':
+          case 'neq':
+            builder.whenTextDoesNotContain(String(value));
+            break;
+          case 'contains':
+            builder.whenTextContains(value);
+            break;
+          case 'notcontains':
+          case 'doesnotcontain':
+            builder.whenTextDoesNotContain(value);
+            break;
+          case 'startswith':
+            builder.whenTextStartsWith(value);
+            break;
+          case 'endswith':
+            builder.whenTextEndsWith(value);
+            break;
+          case 'between':
+            if (rule.min !== undefined && rule.max !== undefined) {
+              builder.whenNumberBetween(rule.min, rule.max);
+            }
+            break;
+          case 'isempty':
+          case 'empty':
+          case 'blank':
+            builder.whenCellEmpty();
+            break;
+          case 'isnotempty':
+          case 'notempty':
+          case 'notblank':
+            builder.whenCellNotEmpty();
+            break;
+          case 'negative':
+            builder.whenNumberLessThan(0);
+            break;
+          case 'positive':
+            builder.whenNumberGreaterThan(0);
+            break;
+          case 'max':
+          case 'ismax':
+          case 'maximum':
+          case 'highest':
+            // Highlight cells equal to max value in their column
+            // We need to use a custom formula for this
+            // For range B3:D14, we need to apply to each column separately
+            Logger.log('[AgentSheetActions] MAX condition - using custom formula');
+            // Use whenFormulaSatisfied for MAX detection
+            // The formula checks if cell equals the max of its column
+            builder.whenFormulaSatisfied('=INDIRECT(ADDRESS(ROW(),COLUMN()))=MAX(INDIRECT(ADDRESS(3,COLUMN())&":"&ADDRESS(14,COLUMN())))');
+            break;
+          case 'min':
+          case 'ismin':
+          case 'minimum':
+          case 'lowest':
+            // Highlight cells equal to min value in their column
+            Logger.log('[AgentSheetActions] MIN condition - using custom formula');
+            builder.whenFormulaSatisfied('=INDIRECT(ADDRESS(ROW(),COLUMN()))=MIN(INDIRECT(ADDRESS(3,COLUMN())&":"&ADDRESS(14,COLUMN())))');
+            break;
+          case 'formula':
+          case 'customformula':
+            // Support custom formulas directly
+            if (value && typeof value === 'string') {
+              builder.whenFormulaSatisfied(value);
+            }
+            break;
+          default:
+            // Check if value is "MAX" or "MIN" as a special case
+            if (String(value).toUpperCase() === 'MAX') {
+              Logger.log('[AgentSheetActions] Value=MAX detected - using MAX formula');
+              builder.whenFormulaSatisfied('=INDIRECT(ADDRESS(ROW(),COLUMN()))=MAX(INDIRECT(ADDRESS(3,COLUMN())&":"&ADDRESS(14,COLUMN())))');
+            } else if (String(value).toUpperCase() === 'MIN') {
+              Logger.log('[AgentSheetActions] Value=MIN detected - using MIN formula');
+              builder.whenFormulaSatisfied('=INDIRECT(ADDRESS(ROW(),COLUMN()))=MIN(INDIRECT(ADDRESS(3,COLUMN())&":"&ADDRESS(14,COLUMN())))');
+            } else {
+              Logger.log('[AgentSheetActions] Unknown condition: ' + rule.condition);
+            }
+        }
+        
+        // Apply format - support both 'format' object and direct properties
+        var format = rule.format || rule;
+        if (format.backgroundColor || format.background) {
+          builder.setBackground(format.backgroundColor || format.background);
+        }
+        if (format.textColor || format.fontColor || format.color) {
+          builder.setFontColor(format.textColor || format.fontColor || format.color);
+        }
+        if (format.bold) builder.setBold(true);
+        if (format.italic) builder.setItalic(true);
+        if (format.strikethrough) builder.setStrikethrough(true);
+        if (format.underline) builder.setUnderline(true);
+        
+        builtRules.push(builder.build());
+      });
+    });
+    
+    // Add to existing rules (don't replace)
+    var existingRules = sheet.getConditionalFormatRules();
+    sheet.setConditionalFormatRules(existingRules.concat(builtRules));
+    
+    return { rulesAdded: builtRules.length, range: rangeStr };
+  }
+  
+  // ==================== DATA VALIDATION ====================
+  
+  /**
+   * Create data validation on a range (supports comma-separated ranges)
+   * @param {Object} step - { validationType, range, config }
+   */
+  function createValidation(step) {
+    var sheet = SpreadsheetApp.getActiveSheet();
+    var config = step.config || {};
+    
+    var rangeStr = config.range || step.range || step.inputRange;
+    var validationType = (config.validationType || step.validationType || '').toLowerCase();
+    var options = config.options || config || {};  // Check both options and config directly
+    
+    // Handle multiple comma-separated ranges
+    var rangeStrings = rangeStr.split(',').map(function(r) { return r.trim(); }).filter(Boolean);
+    Logger.log('[AgentSheetActions] createValidation: type=' + validationType + ', ranges=' + rangeStrings.length);
+    
+    rangeStrings.forEach(function(singleRangeStr) {
+      var range = sheet.getRange(singleRangeStr);
+      var validation;
+      
+      switch (validationType) {
+        case 'dropdown':
+        case 'list':
+          // Check multiple locations for values
+          var values = options.values || config.values || step.values || [];
+          if (values.length > 0) {
+            validation = SpreadsheetApp.newDataValidation()
+              .requireValueInList(values, true)
+              .setAllowInvalid(options.allowInvalid !== false)
+              .build();
+          }
+          break;
+          
+        case 'number':
+        case 'numeric':
+        case 'numberrange':  // Handle AI returning "numberRange"
+          // Handle both min/max and minValue/maxValue naming conventions
+          var min = options.min !== undefined ? options.min : 
+                    config.min !== undefined ? config.min :
+                    options.minValue !== undefined ? options.minValue :
+                    config.minValue;
+          var max = options.max !== undefined ? options.max : 
+                    config.max !== undefined ? config.max :
+                    options.maxValue !== undefined ? options.maxValue :
+                    config.maxValue;
+          
+          if (min !== undefined && max !== undefined) {
+            validation = SpreadsheetApp.newDataValidation()
+              .requireNumberBetween(min, max)
+              .build();
+          } else if (min !== undefined) {
+            validation = SpreadsheetApp.newDataValidation()
+              .requireNumberGreaterThanOrEqualTo(min)
+              .build();
+          } else if (max !== undefined) {
+            validation = SpreadsheetApp.newDataValidation()
+              .requireNumberLessThanOrEqualTo(max)
+              .build();
+          } else {
+            // Default: any number
+            validation = SpreadsheetApp.newDataValidation()
+              .requireNumberGreaterThanOrEqualTo(-999999999)
+              .build();
+          }
+          break;
+          
+        case 'checkbox':
+        case 'boolean':
+          var customTrue = options.checkedValue || options.trueValue;
+          var customFalse = options.uncheckedValue || options.falseValue;
+          
+          if (customTrue && customFalse) {
+            validation = SpreadsheetApp.newDataValidation()
+              .requireCheckbox(customTrue, customFalse)
+              .build();
+          } else {
+            validation = SpreadsheetApp.newDataValidation()
+              .requireCheckbox()
+              .build();
+          }
+          break;
+          
+        case 'date':
+          var afterDate = options.after || options.min;
+          var beforeDate = options.before || options.max;
+          
+          if (afterDate && beforeDate) {
+            validation = SpreadsheetApp.newDataValidation()
+              .requireDateBetween(new Date(afterDate), new Date(beforeDate))
+              .build();
+          } else if (afterDate) {
+            validation = SpreadsheetApp.newDataValidation()
+              .requireDateAfter(new Date(afterDate))
+              .build();
+          } else if (beforeDate) {
+            validation = SpreadsheetApp.newDataValidation()
+              .requireDateBefore(new Date(beforeDate))
+              .build();
+          } else {
+            validation = SpreadsheetApp.newDataValidation()
+              .requireDate()
+              .build();
+          }
+          break;
+          
+        case 'email':
+          validation = SpreadsheetApp.newDataValidation()
+            .requireTextIsEmail()
+            .build();
+          break;
+          
+        case 'url':
+        case 'link':
+          validation = SpreadsheetApp.newDataValidation()
+            .requireTextIsUrl()
+            .build();
+          break;
+          
+        case 'custom':
+          var formula = options.formula || config.formula;
+          if (formula) {
+            validation = SpreadsheetApp.newDataValidation()
+              .requireFormulaSatisfied(formula)
+              .build();
+          }
+          break;
+          
+        default:
+          Logger.log('[AgentSheetActions] Unknown validation type: ' + validationType);
+      }
+      
+      if (validation) {
+        range.setDataValidation(validation);
+        Logger.log('[AgentSheetActions] Validation applied to ' + singleRangeStr);
+      }
+    });
+    
+    return { validationType: validationType, range: rangeStr, rangeCount: rangeStrings.length };
+  }
+  
+  // ==================== FILTER ====================
+  
+  /**
+   * Apply filter to data
+   * @param {Object} step - { dataRange, config: { criteria: [] } }
+   */
+  function applyFilter(step) {
+    var sheet = SpreadsheetApp.getActiveSheet();
+    var config = step.config || {};
+    
+    var rangeStr = config.dataRange || step.dataRange || step.inputRange || detectDataRange(sheet);
+    var dataRange = sheet.getRange(rangeStr);
+    
+    Logger.log('[AgentSheetActions] applyFilter: range=' + rangeStr);
+    
+    // Remove existing filter
+    var existingFilter = sheet.getFilter();
+    if (existingFilter) existingFilter.remove();
+    
+    // Create new filter
+    var filter = dataRange.createFilter();
+    
+    // Apply criteria
+    var criteria = config.criteria || step.criteria || [];
+    criteria.forEach(function(criterion) {
+      var colIndex = getColumnIndex(criterion.column, dataRange);
+      var filterCriteria;
+      var condition = (criterion.condition || '').toLowerCase().replace(/[_\s]/g, '');
+      var value = criterion.value;
+      
+      Logger.log('[AgentSheetActions] Filter criterion: column=' + criterion.column + ', condition=' + condition + ', value=' + value);
+      
+      switch (condition) {
+        case 'equals':
+        case 'equal':
+        case 'eq':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenTextEqualTo(String(value))
+            .build();
+          break;
+        case 'notequals':
+        case 'notequal':
+        case 'neq':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenTextDoesNotContain(String(value))
+            .build();
+          break;
+        case 'contains':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenTextContains(value)
+            .build();
+          break;
+        case 'notcontains':
+        case 'doesnotcontain':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenTextDoesNotContain(value)
+            .build();
+          break;
+        case 'startswith':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenTextStartsWith(value)
+            .build();
+          break;
+        case 'endswith':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenTextEndsWith(value)
+            .build();
+          break;
+        case 'greaterthan':
+        case 'gt':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenNumberGreaterThan(value)
+            .build();
+          break;
+        case 'greaterthanorequal':
+        case 'greaterthanorequalto':
+        case 'gte':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenNumberGreaterThanOrEqualTo(value)
+            .build();
+          break;
+        case 'lessthan':
+        case 'lt':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenNumberLessThan(value)
+            .build();
+          break;
+        case 'lessthanorequal':
+        case 'lessthanorequalto':
+        case 'lte':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenNumberLessThanOrEqualTo(value)
+            .build();
+          break;
+        case 'between':
+          if (criterion.min !== undefined && criterion.max !== undefined) {
+            filterCriteria = SpreadsheetApp.newFilterCriteria()
+              .whenNumberBetween(criterion.min, criterion.max)
+              .build();
+          }
+          break;
+        case 'isempty':
+        case 'empty':
+        case 'blank':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenCellEmpty()
+            .build();
+          break;
+        case 'isnotempty':
+        case 'notempty':
+        case 'notblank':
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .whenCellNotEmpty()
+            .build();
+          break;
+        case 'invaluelist':
+        case 'inlist':
+          // AI might return values as array
+          var values = Array.isArray(value) ? value : [value];
+          filterCriteria = SpreadsheetApp.newFilterCriteria()
+            .setHiddenValues([])  // Show all by default
+            .setVisibleValues(values)
+            .build();
+          break;
+        default:
+          Logger.log('[AgentSheetActions] Unknown filter condition: ' + condition);
+      }
+      
+      if (filterCriteria && colIndex > 0) {
+        filter.setColumnFilterCriteria(colIndex, filterCriteria);
+        Logger.log('[AgentSheetActions] Filter applied to column ' + colIndex);
+      }
+    });
+    
+    return { filterApplied: true, criteriaCount: criteria.length, range: rangeStr };
+  }
+  
+  // ==================== WRITE DATA ====================
+  
+  /**
+   * Write parsed table data to the sheet
+   * Used when user pastes table data (markdown, CSV, etc.) in their command
+   * @param {Object} step - { config: { data: [[]], startCell: "A1" or range: "A1:D10" } }
+   */
+  function writeData(step) {
+    var sheet = SpreadsheetApp.getActiveSheet();
+    var config = step.config || {};
+    
+    // Get data array - should be 2D array [[row1], [row2], ...]
+    var data = config.data || step.data;
+    
+    if (!data || !Array.isArray(data) || data.length === 0) {
+      throw new Error('No data provided to write. Expected 2D array.');
+    }
+    
+    Logger.log('[SheetActions:WriteData] Received ' + data.length + ' rows of data');
+    
+    // Determine target location
+    var startCell = config.startCell || config.range || step.startCell || 'A1';
+    
+    // If range is provided as A1:D10 format, extract just the start cell
+    if (startCell.indexOf(':') !== -1) {
+      startCell = startCell.split(':')[0];
+    }
+    
+    // Parse start cell to get row and column
+    var targetRange = sheet.getRange(startCell);
+    var startRow = targetRange.getRow();
+    var startCol = targetRange.getColumn();
+    
+    // Normalize data - ensure all rows are arrays and pad to max width
+    var normalizedData = [];
+    var maxCols = 0;
+    
+    // First pass: convert to arrays and find max column count
+    data.forEach(function(row, idx) {
+      var rowArray;
+      if (Array.isArray(row)) {
+        rowArray = row;
+      } else if (typeof row === 'string') {
+        // Handle string rows (might be comma or pipe separated)
+        if (row.indexOf('|') !== -1) {
+          rowArray = row.split('|').map(function(cell) { return cell.trim(); });
+        } else if (row.indexOf('\t') !== -1) {
+          rowArray = row.split('\t').map(function(cell) { return cell.trim(); });
+        } else if (row.indexOf(',') !== -1) {
+          rowArray = row.split(',').map(function(cell) { return cell.trim(); });
+        } else {
+          rowArray = [row];
+        }
+      } else {
+        rowArray = [String(row)];
+      }
+      
+      // Clean up cells (remove leading/trailing pipes from markdown)
+      rowArray = rowArray.filter(function(cell, cellIdx) {
+        // Remove empty cells from start/end (markdown table artifacts)
+        if (cellIdx === 0 && cell === '') return false;
+        if (cellIdx === rowArray.length - 1 && cell === '') return false;
+        return true;
+      });
+      
+      if (rowArray.length > maxCols) {
+        maxCols = rowArray.length;
+      }
+      
+      normalizedData.push(rowArray);
+    });
+    
+    // Second pass: pad all rows to same length
+    normalizedData = normalizedData.map(function(row) {
+      while (row.length < maxCols) {
+        row.push('');
+      }
+      return row;
+    });
+    
+    // Skip markdown separator rows (e.g., |---|---|---|)
+    normalizedData = normalizedData.filter(function(row) {
+      return !row.every(function(cell) {
+        return /^[\-\:\s]*$/.test(cell);
+      });
+    });
+    
+    var numRows = normalizedData.length;
+    var numCols = maxCols;
+    
+    if (numRows === 0 || numCols === 0) {
+      throw new Error('No valid data to write after parsing.');
+    }
+    
+    Logger.log('[SheetActions:WriteData] Writing ' + numRows + ' rows x ' + numCols + ' columns to ' + startCell);
+    
+    // Write data to sheet
+    var writeRange = sheet.getRange(startRow, startCol, numRows, numCols);
+    
+    // CRITICAL: Clear any existing formatting first to prevent auto-date conversion
+    writeRange.clearFormat();
+    
+    // Write the data
+    writeRange.setValues(normalizedData);
+    
+    // CRITICAL: Apply appropriate number format to columns that contain numbers
+    // This prevents Google Sheets from interpreting large numbers as dates
+    if (numRows > 1) {
+      // Check header row (first row of data) to identify numeric columns
+      var headerRow = normalizedData[0];
+      var dataRow = normalizedData.length > 1 ? normalizedData[1] : null;
+      
+      if (dataRow) {
+        for (var colIdx = 0; colIdx < numCols; colIdx++) {
+          var sampleValue = dataRow[colIdx];
+          var isNumericColumn = false;
+          
+          // Check if this column contains numbers
+          if (typeof sampleValue === 'number') {
+            isNumericColumn = true;
+          } else if (typeof sampleValue === 'string') {
+            // Check if string looks like a number (not a percentage or date)
+            var cleanValue = sampleValue.replace(/[,$]/g, '');
+            if (/^\d+(\.\d+)?$/.test(cleanValue) && !sampleValue.includes('%') && !sampleValue.includes('-') && !sampleValue.includes('/')) {
+              isNumericColumn = true;
+            }
+          }
+          
+          // Apply plain number format to numeric columns (skip header row)
+          if (isNumericColumn && numRows > 1) {
+            var colRange = sheet.getRange(startRow + 1, startCol + colIdx, numRows - 1, 1);
+            colRange.setNumberFormat('#,##0');
+            Logger.log('[SheetActions:WriteData] Applied number format to column ' + (colIdx + 1));
+          }
+        }
+      }
+    }
+    
+    // Get the written range in A1 notation
+    var writtenRange = writeRange.getA1Notation();
+    
+    Logger.log('[SheetActions:WriteData] ✅ Wrote data to ' + writtenRange);
+    
+    return {
+      range: writtenRange,
+      rowsWritten: numRows,
+      columnsWritten: numCols,
+      startCell: startCell
+    };
+  }
+  
+  // ==================== CREATE TABLE ====================
+  
+  /**
+   * Convert a range to a Google Sheets Table (new native feature)
+   * Uses the Sheets API batchUpdate with addTable request
+   * @param {Object} step - { config: { range: "A1:D10", tableName: "MyTable" } }
+   */
+  function createTable(step) {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = SpreadsheetApp.getActiveSheet();
+    var config = step.config || {};
+    
+    // Get range - supports multiple input formats
+    var rangeStr = config.range || step.range || step.inputRange;
+    if (!rangeStr) {
+      // Try to detect data range if not specified
+      rangeStr = detectDataRange(sheet);
+    }
+    
+    var range = sheet.getRange(rangeStr);
+    var tableName = config.tableName || config.name || 'Table_' + new Date().getTime();
+    
+    // Get sheet ID and range details
+    var sheetId = sheet.getSheetId();
+    var startRow = range.getRow() - 1;  // 0-indexed
+    var startCol = range.getColumn() - 1;  // 0-indexed
+    var endRow = startRow + range.getNumRows();
+    var endCol = startCol + range.getNumColumns();
+    
+    Logger.log('[SheetActions:CreateTable] Creating table "' + tableName + '" at ' + rangeStr);
+    Logger.log('[SheetActions:CreateTable] Sheet ID: ' + sheetId + ', Range: [' + startRow + ',' + startCol + '] to [' + endRow + ',' + endCol + ']');
+    
+    // Build the addTable request for Sheets API
+    var addTableRequest = {
+      addTable: {
+        table: {
+          name: tableName,
+          range: {
+            sheetId: sheetId,
+            startRowIndex: startRow,
+            endRowIndex: endRow,
+            startColumnIndex: startCol,
+            endColumnIndex: endCol
+          }
+        }
+      }
+    };
+    
+    // Execute via Sheets API
+    try {
+      var response = Sheets.Spreadsheets.batchUpdate(
+        { requests: [addTableRequest] },
+        spreadsheet.getId()
+      );
+      
+      Logger.log('[SheetActions:CreateTable] ✅ Table created successfully');
+      
+      // Optionally freeze the header row for better UX
+      if (config.freezeHeader !== false) {
+        sheet.setFrozenRows(range.getRow());
+        Logger.log('[SheetActions:CreateTable] Froze header row at row ' + range.getRow());
+      }
+      
+      return {
+        tableName: tableName,
+        range: rangeStr,
+        tableCreated: true,
+        headerFrozen: config.freezeHeader !== false
+      };
+    } catch (e) {
+      Logger.log('[SheetActions:CreateTable] ❌ Error: ' + e.message);
+      
+      // Fallback: Apply table-like formatting if Sheets API fails
+      // This provides a graceful degradation
+      Logger.log('[SheetActions:CreateTable] Applying table-like formatting as fallback...');
+      
+      try {
+        applyTableFormatting(range);
+        return {
+          tableName: tableName,
+          range: rangeStr,
+          tableCreated: false,
+          fallbackFormatApplied: true,
+          note: 'Native table API unavailable. Applied table-style formatting instead.'
+        };
+      } catch (formatError) {
+        throw new Error('Failed to create table: ' + e.message + '. Fallback also failed: ' + formatError.message);
+      }
+    }
+  }
+  
+  /**
+   * Apply table-like formatting (fallback when Sheets API is unavailable)
+   * This gives a professional look similar to a native table
+   */
+  function applyTableFormatting(range) {
+    var sheet = range.getSheet();
+    var numRows = range.getNumRows();
+    var numCols = range.getNumColumns();
+    var startRow = range.getRow();
+    var startCol = range.getColumn();
+    
+    // Header row styling (first row)
+    var headerRange = sheet.getRange(startRow, startCol, 1, numCols);
+    headerRange.setBackground('#4285F4')  // Google blue
+               .setFontColor('#FFFFFF')
+               .setFontWeight('bold')
+               .setHorizontalAlignment('center');
+    
+    // Add borders to entire range
+    range.setBorder(true, true, true, true, true, true, '#CCCCCC', SpreadsheetApp.BorderStyle.SOLID);
+    
+    // Alternating row colors for data rows
+    if (numRows > 1) {
+      for (var i = 1; i < numRows; i++) {
+        var rowRange = sheet.getRange(startRow + i, startCol, 1, numCols);
+        if (i % 2 === 0) {
+          rowRange.setBackground('#F8F9FA');  // Light gray for even rows
+        } else {
+          rowRange.setBackground('#FFFFFF');  // White for odd rows
+        }
+      }
+    }
+    
+    // Auto-resize columns to fit content
+    for (var col = startCol; col < startCol + numCols; col++) {
+      sheet.autoResizeColumn(col);
+    }
+    
+    Logger.log('[SheetActions:ApplyTableFormatting] Applied table-style formatting');
+  }
+  
+  // ==================== UTILITIES ====================
+  
+  /**
+   * Build data range from AI-provided columns
+   * AI specifies WHICH columns, frontend detects ALL rows with data
+   * This follows the principle: AI decides intent, frontend handles full data
+   */
+  function buildDataRangeFromColumns(sheet, config, step) {
+    // =============================================================
+    // UNIFIED APPROACH: All chart types use domainColumn + dataColumns
+    // - domainColumn: categories, labels, dates, x-values (text/dates)
+    // - dataColumns: numeric values (array - 1 for pie, many for others)
+    // =============================================================
+    
+    // Get domain column (supports both new 'domainColumn' and legacy 'xAxisColumn'/'labelsColumn')
+    var domainColumn = config.domainColumn || config.xAxisColumn || config.labelsColumn;
+    
+    // Get data columns (supports both new 'dataColumns' and legacy 'valuesColumn')
+    var dataColumns = config.dataColumns;
+    if (!dataColumns && config.valuesColumn) {
+      dataColumns = [config.valuesColumn]; // Convert single value to array
+    }
+    
+    if (domainColumn && dataColumns && dataColumns.length > 0) {
+      var chartType = (config.chartType || 'column').toLowerCase();
+      Logger.log('[SheetActions:Chart] Using unified column approach for ' + chartType);
+      Logger.log('[SheetActions:Chart] Domain column: ' + domainColumn);
+      Logger.log('[SheetActions:Chart] Data columns: ' + JSON.stringify(dataColumns));
+      
+      // Build list of all columns (domain first, then data columns)
+      var allColumns = [domainColumn].concat(dataColumns);
+      
+      // Convert column letters to indices
+      var colIndices = allColumns.map(function(col) {
+        return letterToColumn(col);
+      });
+      
+      var minCol = Math.min.apply(null, colIndices);
+      var maxCol = Math.max.apply(null, colIndices);
+      
+      // Detect actual data range for these columns
+      var dataInfo = detectDataBoundaries(sheet, minCol, maxCol);
+      
+      // Build range string
+      var rangeStr = columnToLetter(minCol) + dataInfo.startRow + ':' + 
+                     columnToLetter(maxCol) + dataInfo.endRow;
+      
+      var rowCount = dataInfo.endRow - dataInfo.startRow;
+      Logger.log('[SheetActions:Chart] ✅ Range: ' + rangeStr + 
+                 ' (' + rowCount + ' data rows, ' + dataColumns.length + ' series)');
+      
+      return rangeStr;
+    }
+    
+    // Fallback: Legacy approach with explicit dataRange
+    var rangeStr = config.dataRange || step.dataRange || step.inputRange;
+    if (rangeStr) {
+      Logger.log('[SheetActions:Chart] Using legacy dataRange: ' + rangeStr);
+      var dataRange = sheet.getRange(rangeStr);
+      rangeStr = ensureDateColumnIncluded(sheet, dataRange, rangeStr, config.title || '');
+      return rangeStr;
+    }
+    
+    // Last resort: detect full sheet data
+    Logger.log('[SheetActions:Chart] No range specified, detecting full data range');
+    return detectDataRange(sheet);
+  }
+  
+  /**
+   * Detect the start and end rows containing data for given columns
+   */
+  function detectDataBoundaries(sheet, minCol, maxCol) {
+    var lastRow = sheet.getLastRow();
+    var numCols = maxCol - minCol + 1;
+    
+    // Get all data in the column range
+    var data = sheet.getRange(1, minCol, lastRow, numCols).getValues();
+    
+    var startRow = 1;
+    var endRow = lastRow;
+    
+    // Find first row with data (this is likely the header)
+    for (var i = 0; i < data.length; i++) {
+      var hasData = data[i].some(function(cell) {
+        return cell !== '' && cell !== null;
+      });
+      if (hasData) {
+        startRow = i + 1;
+        break;
+      }
+    }
+    
+    // Find last row with data
+    for (var j = data.length - 1; j >= 0; j--) {
+      var hasData = data[j].some(function(cell) {
+        return cell !== '' && cell !== null;
+      });
+      if (hasData) {
+        endRow = j + 1;
+        break;
+      }
+    }
+    
+    Logger.log('[SheetActions:Chart] Data boundaries: rows ' + startRow + ' to ' + endRow);
+    
+    return {
+      startRow: startRow,
+      endRow: endRow
+    };
+  }
+  
+  /**
+   * Convert column letter to number (A=1, B=2, etc.)
+   */
+  function letterToColumn(letter) {
+    var column = 0;
+    var length = letter.length;
+    for (var i = 0; i < length; i++) {
+      column += (letter.charCodeAt(i) - 64) * Math.pow(26, length - i - 1);
+    }
+    return column;
+  }
+  
+  /**
+   * Ensure the date/label column is included in the chart range
+   * For time-based charts, the first column should contain dates/labels (not numeric data)
+   * If the first column is numeric, we expand to include the previous column
+   */
+  function ensureDateColumnIncluded(sheet, range, rangeStr, title) {
+    try {
+      var startCol = range.getColumn();
+      var startRow = range.getRow();
+      var numRows = range.getNumRows();
+      var numCols = range.getNumColumns();
+      
+      // Skip if already starting from column A
+      if (startCol <= 1) {
+        Logger.log('[SheetActions:Chart] Range already starts from column A');
+        return rangeStr;
+      }
+      
+      // Check if this looks like a time-based chart (trends, over time, etc.)
+      var titleLower = (title || '').toLowerCase();
+      var isTimeBased = titleLower.indexOf('trend') !== -1 || 
+                        titleLower.indexOf('time') !== -1 || 
+                        titleLower.indexOf('month') !== -1 ||
+                        titleLower.indexOf('year') !== -1 ||
+                        titleLower.indexOf('revenue') !== -1;
+      
+      // Get values from the first column of the range
+      var firstColValues = range.getValues();
+      var numericCount = 0;
+      var dateOrTextCount = 0;
+      
+      // Skip header (row 0), check data rows
+      for (var i = 1; i < Math.min(firstColValues.length, 6); i++) {
+        var val = firstColValues[i][0];
+        if (val === null || val === '') continue;
+        
+        // Check if it's a date
+        if (val instanceof Date) {
+          dateOrTextCount++;
+          continue;
+        }
+        
+        // Check if it's numeric (including formatted numbers like "1,234" or "0 đ")
+        if (typeof val === 'number') {
+          numericCount++;
+        } else if (typeof val === 'string') {
+          // Check if it looks like a date string
+          if (val.match(/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/) || 
+              val.match(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i) ||
+              val.match(/^(Tháng|thang)/i)) {
+            dateOrTextCount++;
+          } else {
+            // Check if it's a formatted number
+            var cleanVal = val.replace(/[$€£¥₫đ%,.\s]/g, '');
+            if (!isNaN(parseFloat(cleanVal)) && cleanVal.length > 0) {
+              numericCount++;
+            } else {
+              dateOrTextCount++; // Text label
+            }
+          }
+        }
+      }
+      
+      Logger.log('[SheetActions:Chart] First column analysis: numeric=' + numericCount + 
+                 ', dateOrText=' + dateOrTextCount + ', isTimeBased=' + isTimeBased);
+      
+      // If first column is mostly numeric and this is a time-based chart,
+      // check if previous column has dates
+      if (numericCount > dateOrTextCount && isTimeBased) {
+        var prevCol = startCol - 1;
+        var prevColRange = sheet.getRange(startRow, prevCol, numRows, 1);
+        var prevColValues = prevColRange.getValues();
+        
+        var prevHasDates = false;
+        for (var j = 1; j < Math.min(prevColValues.length, 5); j++) {
+          var pv = prevColValues[j][0];
+          if (pv instanceof Date) {
+            prevHasDates = true;
+            break;
+          }
+          if (typeof pv === 'string' && 
+              (pv.match(/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/) ||
+               pv.match(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i) ||
+               pv.match(/^(Tháng|thang)/i))) {
+            prevHasDates = true;
+            break;
+          }
+        }
+        
+        if (prevHasDates) {
+          var newRange = columnToLetter(prevCol) + startRow + ':' + 
+                         columnToLetter(startCol + numCols - 1) + (startRow + numRows - 1);
+          Logger.log('[SheetActions:Chart] ✅ Expanded range to include date column: ' + rangeStr + ' → ' + newRange);
+          return newRange;
+        }
+      }
+      
+      return rangeStr;
+    } catch (e) {
+      Logger.log('[SheetActions:Chart] Error in ensureDateColumnIncluded: ' + e.message);
+      return rangeStr;
+    }
+  }
+  
+  /**
+   * Auto-detect data range from sheet
+   */
+  function detectDataRange(sheet) {
+    var lastRow = sheet.getLastRow();
+    var lastCol = sheet.getLastColumn();
+    if (lastRow < 1 || lastCol < 1) return 'A1:A1';
+    return 'A1:' + columnToLetter(lastCol) + lastRow;
+  }
+  
+  /**
+   * Convert column letter or name to index
+   */
+  function getColumnIndex(column, range) {
+    if (typeof column === 'number') return column;
+    // Handle single letter columns (A, B, C...)
+    if (column.length === 1 && /[A-Z]/i.test(column)) {
+      return column.toUpperCase().charCodeAt(0) - 64;
+    }
+    // For longer strings, assume it's a column letter like "AA"
+    return columnLetterToIndex(column);
+  }
+  
+  /**
+   * Convert column letter (A, B, ..., AA, AB) to index
+   */
+  function columnLetterToIndex(letter) {
+    var result = 0;
+    for (var i = 0; i < letter.length; i++) {
+      result = result * 26 + (letter.toUpperCase().charCodeAt(i) - 64);
+    }
+    return result;
+  }
+  
+  /**
+   * Convert column index to letter (1=A, 2=B, etc.)
+   */
+  function columnToLetter(col) {
+    var letter = '';
+    while (col > 0) {
+      var mod = (col - 1) % 26;
+      letter = String.fromCharCode(65 + mod) + letter;
+      col = Math.floor((col - 1) / 26);
+    }
+    return letter;
+  }
+  
+  // ============================================
+  // PUBLIC API
+  // ============================================
+  
+  return {
+    isSheetAction: isSheetAction,
+    execute: execute,
+    SHEET_ACTIONS: SHEET_ACTIONS
+  };
+  
+})();
+
+// ============================================
+// GLOBAL FUNCTION FOR FRONTEND
+// ============================================
+
+/**
+ * Execute a sheet action from the frontend
+ * Called by google.script.run.executeSheetAction(step)
+ * 
+ * @param {Object} step - Step configuration from frontend
+ * @return {Object} Result { success: boolean, action?: string, result?: Object, error?: string }
+ */
+function executeSheetAction(step) {
+  Logger.log('[executeSheetAction] Called with: ' + JSON.stringify(step).substring(0, 300));
+  
+  try {
+    // Validate step
+    if (!step || !step.action) {
+      return { success: false, error: 'No action specified' };
+    }
+    
+    // Check if it's a valid sheet action
+    if (!AgentSheetActions.isSheetAction(step.action)) {
+      return { success: false, error: 'Invalid sheet action: ' + step.action };
+    }
+    
+    // Execute the sheet action
+    var result = AgentSheetActions.execute(step);
+    
+    Logger.log('[executeSheetAction] Result: ' + JSON.stringify(result));
+    return result;
+    
+  } catch (e) {
+    Logger.log('[executeSheetAction] Error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}

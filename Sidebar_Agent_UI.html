@@ -1,0 +1,911 @@
+<!--
+  @file Sidebar_Agent_UI.html
+  @version 1.0.0
+  @updated 2026-01-13
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-13): Extracted from Sidebar_Agent.html
+    - Message rendering
+    - Selection capture and display
+    - Quick commands
+  
+  ============================================
+  SIDEBAR_AGENT_UI - UI & Messages Module
+  ============================================
+  
+  Contains:
+  - Welcome message rendering
+  - Selection capture and indicator
+  - Table selection card
+  - Quick commands (translate, summarize, etc.)
+  - Input handling
+  
+  Included by: Sidebar_Agent.html
+-->
+
+<script>
+// ============================================
+// MESSAGES & WELCOME
+// ============================================
+
+function renderWelcomeMessage() {
+  const messagesDiv = document.getElementById('agentMessages');
+  
+  // Check if we have a stored conversation to restore
+  const restorePromptHtml = (typeof renderConversationRestorePrompt === 'function') 
+    ? renderConversationRestorePrompt() 
+    : '';
+  
+  // Messages area (restore prompt only, selection moved to sticky area)
+  messagesDiv.innerHTML = `${restorePromptHtml || ''}`;
+  
+  // Render selection row in STICKY area (always visible above input)
+  const stickyContainer = document.getElementById('selectionRowSticky');
+  if (stickyContainer) {
+    stickyContainer.innerHTML = `
+      <div class="flex items-center gap-1.5 px-2 py-1.5 text-[11px] bg-gradient-to-r from-blue-50 to-slate-50 border border-blue-100 rounded-lg" id="selectionRow">
+        <i data-lucide="map-pin" class="icon-xs" style="color: #3b82f6; flex-shrink: 0;"></i>
+        <input type="text" id="selectionRangeInput" 
+          class="font-mono text-gray-700 text-[11px] px-1.5 py-0.5 border border-blue-200 rounded bg-white w-24 focus:ring-1 focus:ring-blue-400 focus:border-blue-400" 
+          value="" 
+          placeholder="A1:H31"
+          title="Edit range — type a custom range or highlight data in the sheet and click ↻"
+          onchange="updateSelectionRange(this.value)"
+          onfocus="this.select()">
+        <span id="selectionIndicator" class="text-gray-500 flex-1 truncate text-[11px]">Capturing...</span>
+        <span id="selectionDimensions" class="text-[11px] text-gray-600 font-medium hidden"></span>
+        <button onclick="userEditedRange=false; captureSelection(true)" class="text-blue-600 hover:text-blue-700 px-0.5" title="Re-read selection from sheet (resets manual edits)"><i data-lucide="refresh-cw" class="icon-xs"></i></button>
+      </div>
+    `;
+    refreshIcons();
+  }
+  
+  // Capture selection immediately when tab opens (before user interacts)
+  captureSelection();
+  
+  // Pre-fetch subscription status in background for faster Run button response
+  prefetchSubscription();
+}
+
+/**
+ * Pre-fetch subscription status in background
+ * This makes the first Run click faster by caching the quota check result
+ */
+function prefetchSubscription() {
+  google.script.run
+    .withSuccessHandler(function(sub) {
+      currentSubscription = sub;
+      subscriptionCheckedAt = Date.now();
+    })
+    .withFailureHandler(function(error) {
+      // Silently ignore prefetch errors
+    })
+    .getUserSubscription();
+}
+
+// ============================================
+// SELECTION CAPTURE
+// ============================================
+
+// Track last capture time to avoid too-frequent refreshes
+let lastCaptureTime = 0;
+const CAPTURE_DEBOUNCE_MS = 3000; // Don't re-capture within 3 seconds
+
+// Track if user has manually edited the range - don't auto-refresh if so
+let userEditedRange = false;
+
+/**
+ * Called when user manually edits the range input
+ */
+function onRangeInputChange() {
+  userEditedRange = true;
+  console.log('📝 User edited range - disabling auto-refresh');
+}
+
+/**
+ * Reset the user-edited flag (e.g., on new conversation or refresh click)
+ */
+function resetRangeEditFlag() {
+  userEditedRange = false;
+}
+
+/**
+ * Called when user focuses on the command input field (not the range input)
+ * 
+ * Auto-refreshes selection ONLY when:
+ * - User hasn't manually typed a custom range
+ * - Enough time has passed since last capture (debounce)
+ * 
+ * This handles the key user flow:
+ * 1. User highlights data in the Google Sheet
+ * 2. Clicks into the sidebar command input
+ * 3. The range picker should automatically update to reflect the new selection
+ */
+function onInputFocus() {
+  // Don't auto-refresh if user manually edited the range
+  if (userEditedRange) {
+    console.log('📝 Skipping auto-refresh (user has custom range)');
+    return;
+  }
+  
+  const now = Date.now();
+  if (now - lastCaptureTime > CAPTURE_DEBOUNCE_MS) {
+    console.log('🔄 Auto-refreshing selection on input focus');
+    captureSelection();
+  }
+}
+
+/**
+ * Capture the current sheet selection
+ * Called: (1) when tab opens, (2) on input focus after debounce, (3) on manual refresh click
+ * 
+ * This is the SINGLE SOURCE OF TRUTH for selection context.
+ * It updates BOTH currentSelectionContext and window.currentContext
+ * so that all modules (single-step parsing, TaskChain, execution) use the same data.
+ */
+function captureSelection(forceRefresh) {
+  lastCaptureTime = Date.now();
+  const indicator = document.getElementById('selectionIndicator');
+  if (indicator) indicator.textContent = 'Capturing...';
+  
+  google.script.run
+    .withSuccessHandler(function(context) {
+      // ====== SINGLE SOURCE OF TRUTH ======
+      // Update BOTH global context variables so all modules stay in sync
+      currentSelectionContext = context;
+      window.currentContext = context;
+      
+      // Debug logging
+      const si = context.selectionInfo;
+      const cols = si?.columnsWithData || [];
+      const hRow = si?.headerRow || 1;
+      const fullRange = cols.length > 0 && si?.dataEndRow
+        ? `${cols[0]}${hRow}:${cols[cols.length-1]}${si.dataEndRow}` 
+        : si?.range || context.selectedRange;
+      console.log('📍 Selection captured:', fullRange);
+      console.log('📊 Context:', {
+        source: si?.selectionSource || (si?.isExplicit ? 'explicit' : 'auto'),
+        fullRange: fullRange,
+        dataRange: si?.dataRange,
+        columns: cols.join(','),
+        headerRow: hRow,
+        dataRows: si?.dataStartRow + '-' + si?.dataEndRow
+      });
+      
+      // Update UI
+      updateSelectionIndicator(context);
+      
+      // Show table card if applicable
+      if (context.selectionInfo?.isTable) {
+        dismissSelectionCard();
+        showTableSelectionCard(context.selectionInfo, context.sampleData);
+      }
+      
+      // Trigger proactive analysis (if module loaded)
+      if (typeof analyzeDataOnLoad === 'function') {
+        analyzeDataOnLoad();
+      }
+    })
+    .withFailureHandler(function(err) {
+      console.error('Failed to capture selection:', err);
+      if (indicator) indicator.textContent = 'Select cells, then ↻';
+    })
+    .getAgentContext();
+}
+
+/**
+ * Update the selection indicator in the UI
+ * 
+ * Shows:
+ * - Range input: the FULL table range including headers (e.g., A1:H31)
+ *   This is what the user sees and understands — the whole data block.
+ *   The backend separately knows where headers vs data rows are from context metadata.
+ * - Indicator: source badge (Auto-detected / Your Selection / Custom)
+ * - Dimensions: total rows × cols (including header row)
+ */
+function updateSelectionIndicator(context) {
+  const indicator = document.getElementById('selectionIndicator');
+  const rangeInput = document.getElementById('selectionRangeInput');
+  const dimensionsEl = document.getElementById('selectionDimensions');
+  
+  const info = context?.selectionInfo;
+  const sheetName = context?.sheetName ? `[${context.sheetName}]` : '';
+  
+  // Update the range input field
+  // Show the FULL range including headers — this is what users intuitively expect
+  if (rangeInput && !userEditedRange) {
+    let displayRange = '';
+    
+    if (info?.columnsWithData?.length > 0 && info?.dataEndRow) {
+      // Build the full range: from header row to last data row, spanning all data columns
+      const firstCol = info.columnsWithData[0];
+      const lastCol = info.columnsWithData[info.columnsWithData.length - 1];
+      const headerRow = info.headerRow || 1;
+      displayRange = `${firstCol}${headerRow}:${lastCol}${info.dataEndRow}`;
+    } else if (info?.range) {
+      // selectionInfo.range is already the full display range
+      displayRange = info.range;
+    } else if (info?.dataRange) {
+      displayRange = info.dataRange;
+    } else if (context?.selectedRange && context.selectedRange !== 'A1') {
+      displayRange = context.selectedRange;
+    }
+    
+    rangeInput.value = displayRange;
+  }
+  
+  // Update dimensions display (total rows including header × cols)
+  if (dimensionsEl) {
+    const dataRowCount = info?.dataRowCount || info?.numRows || info?.rowCount || 0;
+    // Total rows = data rows + 1 header row
+    const totalRows = dataRowCount > 0 ? dataRowCount + 1 : 0;
+    const colCount = info?.columnsWithData?.length || Object.keys(context?.headerRow || {}).length || 0;
+    if (totalRows > 0 && colCount > 0) {
+      dimensionsEl.textContent = `${totalRows}r × ${colCount}c`;
+      dimensionsEl.classList.remove('hidden');
+    } else {
+      dimensionsEl.classList.add('hidden');
+    }
+  }
+  
+  if (!indicator) return;
+  
+  if (info?.columnsWithData?.length > 0) {
+    // Show source type (auto vs selected) and sheet name
+    const isAuto = info.selectionSource === 'auto' || info.isAutoDetected || !info.isExplicit;
+    let text = isAuto ? '✨ Auto' : '✅ Selected';
+    if (sheetName) text += ' ' + sheetName;
+    
+    indicator.textContent = text;
+    indicator.classList.remove('text-gray-400');
+    indicator.classList.add('text-gray-600');
+  } else if (context?.selectedRange && context.selectedRange !== 'A1') {
+    // Has selection but no table info
+    indicator.textContent = sheetName || '📍 ' + context.selectedRange;
+    indicator.classList.remove('text-gray-400');
+    indicator.classList.add('text-gray-600');
+  } else {
+    indicator.textContent = 'Select data, then ↻';
+    indicator.classList.remove('text-gray-600');
+    indicator.classList.add('text-gray-400');
+  }
+}
+
+/**
+ * Update the selection range from user input
+ * Called when user manually edits the range input field (onchange)
+ * 
+ * This is a KEY user flow:
+ * 1. User highlights data in the sheet
+ * 2. Comes to sidebar and types the range (or edits the auto-detected one)
+ * 3. The context MUST reflect the new range — including headers, columns, sample data
+ * 
+ * Strategy:
+ * - Parse the range to extract columns and row bounds
+ * - Update in-memory context immediately (for responsiveness)
+ * - Then re-fetch actual data from GAS for the new range (accuracy)
+ */
+function updateSelectionRange(newRange) {
+  if (!newRange || !newRange.trim()) return;
+  
+  const trimmedRange = newRange.trim().toUpperCase();
+  
+  // Validate range format — support A1:B10, A:B (full columns), and A1 (single cell)
+  const rangePattern = /^[A-Z]+\d*:[A-Z]+\d*$|^[A-Z]+\d+$/i;
+  if (!rangePattern.test(trimmedRange)) {
+    if (typeof showToast === 'function') {
+      showToast('Invalid range. Use format like A2:H31 or B3:E13', 'error');
+    }
+    return;
+  }
+  
+  // Mark that user has manually edited the range
+  userEditedRange = true;
+  console.log('📝 User edited range to:', trimmedRange);
+  
+  // Parse the range to extract column and row info
+  const match = trimmedRange.match(/([A-Z]+)(\d+)?:([A-Z]+)(\d+)?/i);
+  if (match) {
+    const startCol = match[1];
+    const startRow = match[2] ? parseInt(match[2]) : null;
+    const endCol = match[3];
+    const endRow = match[4] ? parseInt(match[4]) : null;
+    
+    // Build list of columns in the range
+    const startCharCode = startCol.charCodeAt(0);
+    const endCharCode = endCol.charCodeAt(0);
+    const rangeColumns = [];
+    for (let c = startCharCode; c <= endCharCode; c++) {
+      rangeColumns.push(String.fromCharCode(c));
+    }
+    
+    // Update in-memory context immediately
+    if (!currentSelectionContext) {
+      currentSelectionContext = { selectionInfo: {} };
+    }
+    if (!currentSelectionContext.selectionInfo) {
+      currentSelectionContext.selectionInfo = {};
+    }
+    
+    const info = currentSelectionContext.selectionInfo;
+    info.range = trimmedRange;
+    info.isExplicit = true;
+    info.selectionSource = 'explicit';
+    info.isTable = true;
+    info.columnsWithData = rangeColumns;
+    
+    if (startRow && endRow) {
+      // Assume first row is header if startRow is 1, otherwise data starts at startRow
+      const dataStart = (startRow === 1) ? 2 : startRow;
+      info.dataStartRow = dataStart;
+      info.dataEndRow = endRow;
+      info.dataRowCount = endRow - dataStart + 1;
+      info.numRows = info.dataRowCount;
+      info.dataRange = `${startCol}${dataStart}:${endCol}${endRow}`;
+    }
+    
+    currentSelectionContext.selectedRange = trimmedRange;
+    
+    // Sync to window.currentContext
+    window.currentContext = currentSelectionContext;
+    
+    console.log('📝 Range updated in-memory:', {
+      range: trimmedRange,
+      columns: rangeColumns.join(','),
+      dataStart: info.dataStartRow,
+      dataEnd: info.dataEndRow,
+      rows: info.dataRowCount
+    });
+    
+    // Update indicator to show "Custom" badge
+    const indicator = document.getElementById('selectionIndicator');
+    if (indicator) {
+      indicator.textContent = '✏️ Custom';
+      indicator.classList.remove('text-gray-400');
+      indicator.classList.add('text-gray-600');
+    }
+    
+    // Update dimensions
+    const dimensionsEl = document.getElementById('selectionDimensions');
+    if (dimensionsEl && info.dataRowCount && rangeColumns.length) {
+      dimensionsEl.textContent = `${info.dataRowCount}r × ${rangeColumns.length}c`;
+      dimensionsEl.classList.remove('hidden');
+    }
+    
+    if (typeof showToast === 'function') {
+      showToast('Range set to ' + trimmedRange, 'info');
+    }
+    
+    // IMPORTANT: Re-fetch actual headers and sample data from GAS for this range
+    // This ensures the AI gets correct column names, not stale ones
+    console.log('📝 Re-fetching context for custom range...');
+    google.script.run
+      .withSuccessHandler(function(freshContext) {
+        if (!freshContext) return;
+        
+        // Merge: keep user's custom range but use fresh headers/sampleData
+        currentSelectionContext.headerRow = freshContext.headerRow;
+        currentSelectionContext.headers = freshContext.headers;
+        currentSelectionContext.sampleData = freshContext.sampleData;
+        currentSelectionContext.columnDataRanges = freshContext.columnDataRanges;
+        currentSelectionContext.lastRow = freshContext.lastRow;
+        currentSelectionContext.lastColumn = freshContext.lastColumn;
+        
+        // Sync
+        window.currentContext = currentSelectionContext;
+        
+        console.log('📝 Context enriched with fresh data for custom range');
+      })
+      .withFailureHandler(function(err) {
+        console.warn('📝 Failed to enrich custom range context:', err);
+      })
+      .getAgentContext();
+  }
+}
+
+/**
+ * Legacy function for compatibility
+ */
+function checkSelectionContext() {
+  captureSelection();
+}
+
+// ============================================
+// TABLE SELECTION CARD
+// ============================================
+
+/**
+ * Show smart card when user has selected a table
+ */
+function showTableSelectionCard(info, sampleData) {
+  const messagesDiv = document.getElementById('agentMessages');
+  
+  // Build header list
+  const headerList = info.headers
+    .map(h => `<span class="font-medium">${h.column}</span>: ${h.name || '(empty)'}`)
+    .join(' • ');
+  
+  // Build suggestions based on empty columns
+  const suggestions = [];
+  
+  if (info.emptyColumns.length > 0 && info.sourceColumn) {
+    const sourceHeader = info.headers.find(h => h.column === info.sourceColumn)?.name || 'data';
+    
+    // Add "Fill all" option first if multiple columns
+    if (info.emptyColumns.length > 1) {
+      const colNames = info.emptyColumns.map(c => c.header || c.column).join(', ');
+      suggestions.push({
+        text: `Fill all columns from ${info.sourceColumn}`,
+        icon: '🚀',
+        priority: true
+      });
+    }
+    
+    // Simple, generic suggestions - no if-else pattern matching
+    // The AI understands what to do based on column headers
+    info.emptyColumns.forEach(col => {
+      if (col.header) {
+          suggestions.push({
+          text: `Fill "${col.header}" from ${info.sourceColumn}`,
+            icon: '✨'
+          });
+      }
+    });
+  }
+  
+  // If we have suggestions, show compact card
+  if (suggestions.length > 0) {
+    const suggestionsHtml = suggestions.slice(0, 3).map(s => 
+      `<button onclick="useTableSuggestion(this)" class="w-full text-left px-1.5 py-1 text-[11px] bg-white border border-gray-200 rounded hover:border-blue-300 hover:bg-blue-50 transition-colors truncate">
+        ${s.icon} ${s.text}
+      </button>`
+    ).join('');
+    
+    // Show badge for explicit vs auto-detected
+    const isExplicit = info.isExplicit || info.selectionSource === 'explicit';
+    const sourceBadge = isExplicit 
+      ? '<span class="text-[8px] bg-green-100 text-green-700 px-1 rounded">Your Selection</span>'
+      : '<span class="text-[8px] bg-amber-100 text-amber-700 px-1 rounded">Auto-detected</span>';
+    
+    const cardHtml = `
+      <div class="card p-2 bg-blue-50/50 border-blue-100" id="selectionCard">
+        <div class="flex items-center gap-1.5 mb-1.5">
+          <span class="text-xs">📊</span>
+          <span class="text-[11px] font-medium text-gray-600 flex-1 truncate">${info.range}</span>
+          ${sourceBadge}
+          <button onclick="dismissSelectionCard()" class="text-gray-500 hover:text-gray-600 text-[11px]">✕</button>
+          </div>
+        ${info.emptyColumns.length > 0 ? `<div class="space-y-1">${suggestionsHtml}</div>` : ''}
+      </div>
+    `;
+    
+    messagesDiv.insertAdjacentHTML('afterbegin', cardHtml);
+  }
+}
+
+function useTableSuggestion(element) {
+  const text = element.textContent.trim().replace(/^[^\s]+\s/, ''); // Remove emoji
+  document.getElementById('agentInput').value = text;
+  dismissSelectionCard();
+  processAgentCommand();
+}
+
+function dismissSelectionCard() {
+  const card = document.getElementById('selectionCard');
+  if (card) card.remove();
+}
+
+// ============================================
+// QUICK COMMANDS & INPUT
+// ============================================
+
+function handleAgentInputKeydown(event) {
+  // Enter to send (like normal chat behavior)
+  // Shift+Enter for new line
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    
+    // Get input element
+    const inputEl = document.getElementById('agentInput');
+    if (!inputEl) return;
+    
+    // Small delay to ensure any pending input (fast typing) is captured
+    // Then capture value and process
+    setTimeout(() => {
+      const value = inputEl.value?.trim();
+      if (!value) return; // Silently ignore empty input
+      processAgentCommand(value);
+    }, 15);
+  }
+  // Shift+Enter allows default behavior (new line)
+}
+
+function setQuickCommand(type) {
+  const input = document.getElementById('agentInput');
+  // Use natural language - no need for exact ranges!
+  const commands = {
+    summarize: 'Summarize the text in column A to column B',
+    translate: 'Translate column A to Spanish, French, German in columns B, C, D',
+    extract: 'Extract email addresses from column A to column B',
+    classify: 'Classify column A as Positive/Negative/Neutral in column B',
+    generate: 'Generate product descriptions based on column A, output to B',
+    analyze: 'Analyze sentiment of column A and output to column B'
+  };
+  input.value = commands[type] || '';
+  input.focus();
+}
+
+function useExample(element) {
+  document.getElementById('agentInput').value = element.textContent.replace(/"/g, '').trim();
+  processAgentCommand();
+}
+
+function useSuggestion(element) {
+  document.getElementById('agentInput').value = element.textContent.replace(/"/g, '').trim();
+  processAgentCommand();
+}
+
+/**
+ * Remove the thinking message from the messages area
+ */
+function removeThinkingMessage() {
+  const messagesDiv = document.getElementById('agentMessages');
+  if (!messagesDiv) return;
+  
+  const thinkingMsg = messagesDiv.querySelector('[data-type="thinking"]');
+  if (thinkingMsg) thinkingMsg.remove();
+}
+
+/**
+ * Save task to history (calls backend)
+ */
+function saveTaskToHistory(taskData) {
+  google.script.run
+    .withSuccessHandler(function() {
+      console.log('Task saved to history');
+      // Refresh history in UI
+      google.script.run
+        .withSuccessHandler(function(prefs) {
+          agentPrefs = prefs || { model: 'GEMINI', recentTasks: [] };
+          renderTaskHistory();
+        })
+        .getAgentPreferences();
+    })
+    .withFailureHandler(function(err) {
+      console.error('Failed to save task to history:', err);
+    })
+    .addTaskToHistory(taskData);
+}
+
+// ============================================
+// QUOTA ENFORCEMENT & UPGRADE MODAL
+// ============================================
+
+/**
+ * Current subscription state (cached)
+ */
+let currentSubscription = null;
+let subscriptionCheckedAt = 0;
+const SUBSCRIPTION_CACHE_TTL_MS = 60000; // Cache for 60 seconds
+
+/**
+ * Check if user can proceed (for quota enforcement)
+ * OPTIMIZED: Uses cached subscription for unlimited users or recent checks
+ */
+function checkQuotaBeforeAction(callback) {
+  const now = Date.now();
+  
+  // Fast path: If we have a recent cached subscription that allows proceeding
+  if (currentSubscription && (now - subscriptionCheckedAt) < SUBSCRIPTION_CACHE_TTL_MS) {
+    // Unlimited users never need re-checking
+    if (currentSubscription.isUnlimited || currentSubscription.tier === 'pro' || currentSubscription.tier === 'early_adopter') {
+      if (typeof callback === 'function') {
+        callback();
+      }
+      return;
+    }
+    
+    // Free users with remaining quota can proceed
+    if (currentSubscription.canProceed && currentSubscription.remaining > 0) {
+      if (typeof callback === 'function') {
+        callback();
+      }
+      return;
+    }
+  }
+  
+  // Need to check with server
+  google.script.run
+    .withSuccessHandler(function(sub) {
+      currentSubscription = sub;
+      subscriptionCheckedAt = Date.now();
+      
+      if (!sub.canProceed) {
+        showUpgradeModal();
+        showNotification(sub.reason || 'Monthly limit reached', 'warning');
+        return;
+      }
+      
+      // Quota OK, proceed with callback
+      if (typeof callback === 'function') {
+        callback();
+      }
+    })
+    .withFailureHandler(function(error) {
+      console.error('Failed to check quota:', error);
+      // Allow on error (fail open)
+      if (typeof callback === 'function') {
+        callback();
+      }
+    })
+    .getUserSubscription();
+}
+
+/**
+ * Show the upgrade modal
+ */
+function showUpgradeModal() {
+  // Remove existing modal if any
+  const existing = document.getElementById('upgradeModal');
+  if (existing) existing.remove();
+  
+  const modalHtml = `
+    <div id="upgradeModal" class="fixed inset-0 z-50 flex items-center justify-center">
+      <!-- Backdrop -->
+      <div class="absolute inset-0 bg-black/50" onclick="hideUpgradeModal()"></div>
+      
+      <!-- Modal Content - 8px grid spacing -->
+      <div class="relative bg-white rounded-lg shadow-xl w-[calc(100%-32px)] max-w-sm mx-4 overflow-hidden">
+        <!-- Header -->
+        <div class="p-4 border-b border-gray-100">
+          <div class="flex items-center justify-between">
+            <h2 class="text-base font-semibold text-gray-900">Upgrade to Pro</h2>
+            <button onclick="hideUpgradeModal()" class="text-gray-500 hover:text-gray-600 text-lg leading-none">&times;</button>
+          </div>
+          <p class="text-xs text-gray-500 mt-1">Get unlimited AI queries for serious data work</p>
+        </div>
+        
+        <!-- Pricing Card - 16px padding (--space-md) -->
+        <div class="p-4">
+          <div class="text-center mb-4">
+            <div class="inline-block bg-gradient-to-r from-orange-500 to-red-500 text-white px-2 py-0.5 rounded-full text-[11px] font-medium mb-2">
+              🔥 50% OFF
+            </div>
+            <div class="flex items-center justify-center gap-2">
+              <span class="text-base text-gray-500 line-through">$29.99</span>
+              <span class="text-2xl font-bold text-blue-600">$14.99</span>
+              <span class="text-xs text-gray-500">/mo</span>
+            </div>
+            <div class="text-[11px] text-green-600 font-medium mt-1">Save $15/month forever</div>
+          </div>
+          
+          <!-- Features - 8px gap between items -->
+          <ul class="space-y-2 mb-4">
+            <li class="flex items-start gap-2 text-xs">
+              <svg class="w-4 h-4 text-green-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+              </svg>
+              <span><strong>Unlimited queries</strong> – No monthly limits</span>
+            </li>
+            <li class="flex items-start gap-2 text-xs">
+              <svg class="w-4 h-4 text-green-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+              </svg>
+              <span><strong>AI Agent</strong> – Bulk processing & automation</span>
+            </li>
+            <li class="flex items-start gap-2 text-xs">
+              <svg class="w-4 h-4 text-green-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+              </svg>
+              <span><strong>Priority support</strong> – Get help when you need it</span>
+            </li>
+            <li class="flex items-start gap-2 text-xs">
+              <svg class="w-4 h-4 text-green-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+              </svg>
+              <span><strong>Early access</strong> – Try new features first</span>
+            </li>
+          </ul>
+          
+          <!-- CTA Button - 40px height (--row-height-standard) -->
+          <button 
+            id="upgradeBtn"
+            onclick="handleUpgrade()" 
+            class="w-full h-10 px-4 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors shadow-sm">
+            Upgrade Now
+          </button>
+          
+          <!-- Trust Indicator -->
+          <p class="text-[11px] text-gray-500 text-center mt-3">
+            🔒 Secure payment via Stripe
+          </p>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+/**
+ * Hide the upgrade modal
+ */
+function hideUpgradeModal() {
+  const modal = document.getElementById('upgradeModal');
+  if (modal) modal.remove();
+}
+
+/**
+ * Handle upgrade button click
+ */
+function handleUpgrade() {
+  const btn = document.getElementById('upgradeBtn');
+  if (btn) {
+    btn.textContent = 'Loading...';
+    btn.disabled = true;
+  }
+  
+  google.script.run
+    .withSuccessHandler(function(url) {
+      if (url) {
+        // Open Stripe checkout in new window
+        window.open(url, '_blank');
+        hideUpgradeModal();
+        showNotification('Redirecting to checkout...', 'success');
+      } else {
+        showNotification('Failed to create checkout session', 'error');
+      }
+      
+      // Reset button
+      if (btn) {
+        btn.textContent = 'Upgrade Now';
+        btn.disabled = false;
+      }
+    })
+    .withFailureHandler(function(error) {
+      console.error('Checkout error:', error);
+      showNotification('Error: ' + (error.message || 'Failed to create checkout'), 'error');
+      
+      if (btn) {
+        btn.textContent = 'Upgrade Now';
+        btn.disabled = false;
+      }
+    })
+    .createCheckoutSession();
+}
+
+/**
+ * Refresh usage after action (call after API calls)
+ */
+function refreshUsageAfterAction() {
+  // Refresh the header bar subscription status
+  if (typeof loadSubscriptionStatus === 'function') {
+    setTimeout(loadSubscriptionStatus, 500);
+  }
+}
+
+// ============================================
+// GENERIC WARNING MODAL
+// ============================================
+
+/**
+ * Pending warning resolution callbacks (keyed by modal ID)
+ */
+const pendingWarningResolvers = {};
+
+/**
+ * Show a generic warning modal with customizable options
+ * Returns a Promise that resolves with the user's choice
+ * 
+ * @param {Object} config - Modal configuration
+ * @param {string} config.id - Unique modal ID
+ * @param {string} config.title - Modal title
+ * @param {string} config.message - Main message
+ * @param {string} [config.details] - Additional details (can be HTML)
+ * @param {Array<{id: string, label: string, class?: string, icon?: string}>} config.actions - Action buttons
+ * @param {boolean} [config.canDismiss=true] - Whether clicking backdrop dismisses
+ * @returns {Promise<string>} - Resolves with the action ID chosen
+ */
+function showWarningModal(config) {
+  return new Promise((resolve) => {
+    // Remove existing modal with same ID if any
+    const existing = document.getElementById(config.id);
+    if (existing) existing.remove();
+    
+    // Store resolver
+    pendingWarningResolvers[config.id] = resolve;
+    
+    // Build action buttons HTML
+    const actionsHtml = config.actions.map(action => {
+      const btnClass = action.class || 'btn-outline';
+      const icon = action.icon ? `<span class="mr-1">${action.icon}</span>` : '';
+      return `<button onclick="resolveWarningModal('${config.id}', '${action.id}')" class="btn ${btnClass} btn-sm flex-1">${icon}${action.label}</button>`;
+    }).join('\n');
+    
+    const modalHtml = `
+      <div id="${config.id}" class="fixed inset-0 z-50 flex items-center justify-center">
+        <!-- Backdrop -->
+        <div class="absolute inset-0 bg-black/50" ${config.canDismiss !== false ? `onclick="resolveWarningModal('${config.id}', 'dismiss')"` : ''}></div>
+        
+        <!-- Modal Content -->
+        <div class="relative bg-white rounded-lg shadow-xl w-[calc(100%-32px)] max-w-sm mx-4 overflow-hidden">
+          <!-- Header -->
+          <div class="p-4 border-b border-gray-100">
+            <div class="flex items-center gap-2">
+              <span class="text-xl">⚠️</span>
+              <h2 class="text-base font-semibold text-gray-900">${config.title}</h2>
+            </div>
+          </div>
+          
+          <!-- Content -->
+          <div class="p-4">
+            <p class="text-sm text-gray-700 mb-3">${config.message}</p>
+            ${config.details ? `<div class="text-xs text-gray-500 bg-gray-50 rounded p-2 mb-4 max-h-24 overflow-y-auto">${config.details}</div>` : ''}
+            
+            <!-- Actions -->
+            <div class="flex flex-wrap gap-2">
+              ${actionsHtml}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+  });
+}
+
+/**
+ * Resolve a warning modal with the chosen action
+ */
+function resolveWarningModal(modalId, actionId) {
+  const modal = document.getElementById(modalId);
+  if (modal) modal.remove();
+  
+  const resolver = pendingWarningResolvers[modalId];
+  if (resolver) {
+    delete pendingWarningResolvers[modalId];
+    resolver(actionId);
+  }
+}
+
+/**
+ * Show empty results warning and let user decide
+ * 
+ * @param {string} column - Column letter
+ * @param {Array} emptyResults - Array of empty result objects (with input field)
+ * @param {number} totalResults - Total number of results
+ * @returns {Promise<string>} - User's choice: 'retry', 'write', 'skip', 'cancel'
+ */
+function showEmptyResultsWarning(column, emptyResults, totalResults) {
+  const emptyCount = emptyResults.length;
+  const emptyIndices = emptyResults.map(r => r.index + 1).join(', '); // 1-based for users
+  const emptyPercent = Math.round((emptyCount / totalResults) * 100);
+  
+  // Check if we have input data to enable retry
+  const hasInputData = emptyResults.some(r => r.input && String(r.input).trim());
+  
+  const actions = [
+    { id: 'write', label: 'Write Anyway', icon: '📝', class: 'btn-outline' },
+    { id: 'skip', label: 'Skip Empty', icon: '⏭️', class: 'btn-outline' },
+    { id: 'cancel', label: 'Cancel', icon: '✕', class: 'btn-outline text-gray-500' }
+  ];
+  
+  // Only show retry if we have input data to retry with
+  if (hasInputData) {
+    actions.unshift({ id: 'retry', label: 'Retry Failed', icon: '🔄', class: 'btn-primary' });
+  }
+  
+  return showWarningModal({
+    id: 'emptyResultsModal_' + column,
+    title: `Empty Results in Column ${column}`,
+    message: `AI failed to generate content for ${emptyCount} of ${totalResults} rows (${emptyPercent}%).`,
+    details: `<strong>Affected rows:</strong> ${emptyIndices}<br><span class="text-gray-400">This can happen due to API timeouts, rate limits, or problematic input data.</span>`,
+    canDismiss: false,
+    actions: actions
+  });
+}
+
+console.log('📦 Agent UI module loaded');
+</script>

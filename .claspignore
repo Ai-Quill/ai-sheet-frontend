@@ -1,0 +1,9 @@
+# Ignore archive folder (backup files not for deployment)
+archive/**
+
+# Ignore documentation
+*.md
+CHANGELOG_*
+
+# Ignore node_modules if any
+node_modules/**

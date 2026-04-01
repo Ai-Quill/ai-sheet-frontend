@@ -1,0 +1,279 @@
+<!--
+  @file Sidebar_Agent.html
+  @version 4.0.0
+  @updated 2026-01-13
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 4.0.0 (2026-01-13): MAJOR REFACTOR - Modular architecture
+    * Split 3000+ line monolith into 4 focused modules
+    * Sidebar_Agent_Core.html - State, initialization, model selector, task history
+    * Sidebar_Agent_UI.html - Welcome message, selection capture, quick commands
+    * Sidebar_Agent_Parsing.html - Command parsing, plan creation, AI integration
+    * Sidebar_Agent_Execution.html - Job execution, SSE monitoring, progress tracking
+  - 3.1.0 (2026-01-12): Compact design for fixed ~300px sidebar
+  - 3.0.0 (2026-01-12): 8-point grid system
+  - 2.9.0 (2026-01-12): UX overhaul - prominent input
+  - 2.5.0 (2026-01-11): Multi-column table fill
+  - 2.4.0 (2026-01-11): Auto-detect table selection
+  - 2.0.0 (2026-01-10): Model selector, task history
+  - 1.0.0 (2026-01-10): Initial chat-based agent interface
+  
+  ============================================
+  SIDEBAR_AGENT.html - AI Agent Orchestrator
+  ============================================
+  
+  This file now serves as an orchestrator that includes
+  the modular components. The actual implementation has
+  been split into 4 focused modules for maintainability.
+  
+  Module Architecture:
+  ┌─────────────────────────────────────────────────────┐
+  │  Sidebar_Agent.html (this file)                     │
+  │  └─ Sidebar_Agent_Core.html      - State & init     │
+  │  └─ Sidebar_Agent_UI.html        - Messages & UI    │
+  │  └─ Sidebar_Agent_Parsing.html   - Command parsing  │
+  │  └─ Sidebar_Agent_Execution.html - Job execution    │
+  └─────────────────────────────────────────────────────┘
+  
+  Dependencies:
+  - Sidebar_i18n.html (for multi-language keyword detection)
+  - Sidebar_Utils.html (for showToast, setActiveTab, etc.)
+  
+  Included by: Sidebar.html
+  Usage: include('Sidebar_Agent')
+-->
+
+<!-- ========================================
+     AGENT CSS STYLES
+     Specific styles for the agent interface
+     ======================================== -->
+<style>
+/* Agent layout - fixed input at bottom */
+.agent-layout {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 180px);
+  min-height: 300px;
+}
+
+.agent-scroll-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  padding-bottom: 120px; /* Space for fixed input */
+}
+
+.agent-fixed-input {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: white;
+  border-top: 1px solid #e5e7eb;
+  padding: 8px;
+  box-shadow: 0 -2px 8px rgba(0,0,0,0.05);
+}
+
+/* Agent input textarea */
+.agent-textarea {
+  width: 100%;
+  resize: none;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 11px;
+  line-height: 1.4;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.agent-textarea:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+}
+
+.agent-textarea-elevated {
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+/* Model selector */
+.agent-model-select {
+  font-size: 10px;
+  padding: 4px 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: white;
+  color: #374151;
+  cursor: pointer;
+  min-width: 100px;
+}
+
+.agent-model-select:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+/* Send button */
+.agent-send-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  color: white;
+  font-size: 14px;
+  font-weight: bold;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.2s, transform 0.1s;
+}
+
+.agent-send-btn:hover {
+  opacity: 0.9;
+  transform: scale(1.02);
+}
+
+.agent-send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.agent-send-btn.processing {
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+/* Quick action buttons */
+.quick-action {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+  background: white;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.quick-action:hover {
+  background: #f3f4f6;
+  border-color: #3b82f6;
+}
+
+/* Example command chips */
+.example-cmd {
+  font-size: 9px;
+  padding: 4px 8px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.example-cmd:hover {
+  background: #eff6ff;
+  border-color: #3b82f6;
+  color: #1d4ed8;
+}
+
+/* Progress styles */
+.progress-header {
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.progress-icon {
+  font-size: 16px;
+}
+
+.live-indicator {
+  font-size: 8px;
+  color: #22c55e;
+  font-weight: 600;
+  animation: blink 1.5s infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.col-progress-row {
+  padding: 6px 8px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  background: #f9fafb;
+}
+
+.col-progress-active {
+  background: #eff6ff;
+}
+
+.col-progress-failed {
+  background: #fef2f2;
+}
+
+.status-pending {
+  color: #6b7280;
+}
+
+.status-failed {
+  color: #ef4444;
+}
+
+/* Progress bar */
+.progress {
+  height: 3px;
+  background: #e5e7eb;
+  border-radius: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+
+.progress-bar-animated {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+  transition: width 0.3s ease;
+}
+
+.progress-bar-success {
+  background: #22c55e !important;
+}
+
+.progress-bar-warning {
+  background: #f59e0b !important;
+}
+</style>
+
+<!-- ========================================
+     NOTE: Module includes are in Sidebar.html
+     
+     Google Apps Script only processes <?!= ?> 
+     directives in the top-level template file.
+     Therefore, all module includes must be in
+     Sidebar.html, not nested here.
+     
+     Module load order (in Sidebar.html):
+     1. Sidebar_Agent.html (this file - CSS only)
+     2. Sidebar_Agent_Core.html
+     3. Sidebar_Agent_UI.html
+     4. Sidebar_Agent_Parsing.html
+     5. Sidebar_Agent_Execution.html
+     ======================================== -->
+
+<script>
+console.log('📦 Sidebar_Agent styles loaded (v4.0.0 - Modular)');
+</script>

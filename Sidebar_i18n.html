@@ -1,0 +1,431 @@
+<!--
+  @file Sidebar_i18n.html
+  @version 1.1.0
+  @updated 2026-01-13
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.1.0 (2026-01-13): Added classification options
+    - I18N_CLASSIFICATION_OPTIONS: Good/Bad/Neutral in 14 languages
+    - I18N_YESNO_OPTIONS: Yes/No in 14 languages
+    - getClassificationOptions(lang) - Get options by language code
+    - getYesNoOptions(lang) - Get yes/no by language code
+    - getClassificationOptionsFromText(text) - Auto-detect and get options
+  - 1.0.0 (2026-01-13): Initial release
+    - Multi-language keyword detection for 14 languages
+    - Intent patterns: fillAll, translate, summarize, sentiment, extract, classify
+    - Classification header detection for format options
+    - Language auto-detection from input text
+  
+  ============================================
+  SIDEBAR_i18n.html - Internationalization Module
+  ============================================
+  
+  Provides multi-language support for command parsing:
+  - Detects user intent across 14 languages
+  - Matches keywords for multi-column fill, translation, etc.
+  - Identifies classification headers for format options
+  - Provides localized classification options (Good/Bad/Neutral, Yes/No)
+  
+  Supported Languages:
+  en (English), vi (Vietnamese), es (Spanish), fr (French),
+  de (German), pt (Portuguese), zh (Chinese), ja (Japanese),
+  ko (Korean), ru (Russian), ar (Arabic), hi (Hindi),
+  th (Thai), id (Indonesian)
+  
+  Usage:
+  - isFillAllCommand(input) - Check if user wants to fill all columns
+  - isSingleColumnCommand(input) - Check if user specifies single column
+  - isClassificationHeader(header) - Check if header is classification type
+  - detectTaskType(input) - Detect task type (translate, summarize, etc.)
+  - detectInputLanguage(input) - Auto-detect language of input
+  - getClassificationOptions(lang) - Get "Good, Bad, Neutral" in language
+  - getClassificationOptionsFromText(text) - Auto-detect language and get options
+-->
+<script>
+/**
+ * Internationalization (i18n) for command keyword detection
+ * Supports multiple languages for better user experience globally
+ * 
+ * Each intent has patterns in multiple languages that help the agent
+ * understand what the user wants to do.
+ */
+
+const I18N_PATTERNS = {
+  // Commands that indicate filling ALL columns (multi-column operation)
+  fillAll: {
+    en: ['fill all', 'all columns', 'complete table', 'fill table', 'the table', 'this table', 'fill everything', 'complete all'],
+    vi: ['điền hết', 'tất cả', 'điền bảng', 'hoàn thành bảng', 'bảng này', 'cho bảng', 'dữ liệu cho bảng', 'điền tất cả', 'toàn bộ'],
+    es: ['llenar todo', 'todas las columnas', 'completar tabla', 'toda la tabla', 'esta tabla', 'rellenar todo'],
+    fr: ['remplir tout', 'toutes les colonnes', 'compléter le tableau', 'ce tableau', 'cette table', 'remplir le tableau'],
+    de: ['alles ausfüllen', 'alle spalten', 'tabelle ausfüllen', 'diese tabelle', 'tabelle vervollständigen'],
+    pt: ['preencher tudo', 'todas as colunas', 'completar tabela', 'esta tabela', 'preencher tabela'],
+    zh: ['填充全部', '所有列', '填写表格', '这个表格', '完成表格', '填满'],
+    ja: ['すべて入力', 'すべての列', 'テーブルを埋める', 'このテーブル', '表を完成'],
+    ko: ['모두 채우기', '모든 열', '테이블 채우기', '이 테이블', '표 완성'],
+    ru: ['заполнить все', 'все столбцы', 'заполнить таблицу', 'эта таблица', 'завершить таблицу'],
+    ar: ['ملء الكل', 'جميع الأعمدة', 'ملء الجدول', 'هذا الجدول'],
+    hi: ['सब भरें', 'सभी कॉलम', 'टेबल भरें', 'यह टेबल'],
+    th: ['เติมทั้งหมด', 'ทุกคอลัมน์', 'เติมตาราง', 'ตารางนี้'],
+    id: ['isi semua', 'semua kolom', 'lengkapi tabel', 'tabel ini'],
+  },
+
+  // Commands that indicate translation task
+  translate: {
+    en: ['translate', 'translation', 'convert to', 'in english', 'in spanish', 'in french', 'in german', 'to english', 'to spanish'],
+    vi: ['dịch', 'dịch sang', 'chuyển ngữ', 'sang tiếng', 'bản dịch'],
+    es: ['traducir', 'traducción', 'al inglés', 'al español', 'al francés'],
+    fr: ['traduire', 'traduction', 'en anglais', 'en espagnol', 'en français'],
+    de: ['übersetzen', 'übersetzung', 'auf englisch', 'auf deutsch', 'auf französisch'],
+    pt: ['traduzir', 'tradução', 'para inglês', 'para português', 'para espanhol'],
+    zh: ['翻译', '译成', '转换成', '英文', '中文'],
+    ja: ['翻訳', '訳す', '英語に', '日本語に'],
+    ko: ['번역', '번역하다', '영어로', '한국어로'],
+    ru: ['перевести', 'перевод', 'на английский', 'на русский'],
+    ar: ['ترجمة', 'ترجم', 'إلى الإنجليزية', 'إلى العربية'],
+    hi: ['अनुवाद', 'अनुवाद करें', 'अंग्रेजी में', 'हिंदी में'],
+    th: ['แปล', 'แปลภาษา', 'เป็นภาษาอังกฤษ', 'เป็นภาษาไทย'],
+    id: ['terjemahkan', 'terjemahan', 'ke bahasa inggris', 'ke bahasa indonesia'],
+  },
+
+  // Commands that indicate summarization
+  summarize: {
+    en: ['summarize', 'summary', 'brief', 'shorten', 'condense', 'tldr', 'key points'],
+    vi: ['tóm tắt', 'tóm lược', 'rút gọn', 'ngắn gọn', 'điểm chính'],
+    es: ['resumir', 'resumen', 'breve', 'acortar', 'puntos clave'],
+    fr: ['résumer', 'résumé', 'bref', 'raccourcir', 'points clés'],
+    de: ['zusammenfassen', 'zusammenfassung', 'kürzen', 'kernpunkte'],
+    pt: ['resumir', 'resumo', 'breve', 'encurtar', 'pontos chave'],
+    zh: ['总结', '摘要', '简述', '概括', '要点'],
+    ja: ['要約', '概要', '要点', '短くする'],
+    ko: ['요약', '요약하다', '핵심', '줄이다'],
+    ru: ['резюме', 'краткое', 'сократить', 'ключевые моменты'],
+  },
+
+  // Commands indicating sentiment analysis
+  sentiment: {
+    en: ['sentiment', 'feeling', 'emotion', 'positive or negative', 'mood', 'tone'],
+    vi: ['cảm xúc', 'tích cực', 'tiêu cực', 'phân tích cảm xúc', 'tâm trạng'],
+    es: ['sentimiento', 'emoción', 'positivo o negativo', 'tono'],
+    fr: ['sentiment', 'émotion', 'positif ou négatif', 'ton'],
+    de: ['stimmung', 'gefühl', 'positiv oder negativ', 'ton'],
+    pt: ['sentimento', 'emoção', 'positivo ou negativo', 'tom'],
+    zh: ['情感', '情绪', '积极消极', '语气'],
+    ja: ['感情', 'センチメント', 'ポジティブ', 'ネガティブ'],
+    ko: ['감정', '감성', '긍정적', '부정적'],
+  },
+
+  // Commands indicating data extraction
+  extract: {
+    en: ['extract', 'get', 'pull out', 'find', 'parse', 'grab'],
+    vi: ['trích xuất', 'lấy', 'tìm', 'rút ra', 'lọc'],
+    es: ['extraer', 'obtener', 'sacar', 'encontrar'],
+    fr: ['extraire', 'obtenir', 'tirer', 'trouver'],
+    de: ['extrahieren', 'herausziehen', 'finden', 'holen'],
+    pt: ['extrair', 'obter', 'tirar', 'encontrar'],
+    zh: ['提取', '获取', '找出', '抽取'],
+    ja: ['抽出', '取り出す', '見つける'],
+    ko: ['추출', '가져오기', '찾기'],
+  },
+
+  // Commands indicating classification/categorization
+  classify: {
+    en: ['classify', 'categorize', 'category', 'group', 'label', 'tag', 'type'],
+    vi: ['phân loại', 'danh mục', 'nhóm', 'gắn nhãn', 'loại'],
+    es: ['clasificar', 'categorizar', 'categoría', 'grupo', 'etiqueta'],
+    fr: ['classer', 'catégoriser', 'catégorie', 'groupe', 'étiquette'],
+    de: ['klassifizieren', 'kategorisieren', 'kategorie', 'gruppe', 'kennzeichnen'],
+    pt: ['classificar', 'categorizar', 'categoria', 'grupo', 'etiqueta'],
+    zh: ['分类', '归类', '类别', '标签', '类型'],
+    ja: ['分類', 'カテゴリ', 'グループ', 'ラベル'],
+    ko: ['분류', '카테고리', '그룹', '라벨'],
+  },
+
+  // Single column specific indicators (should NOT trigger multi-column)
+  singleColumn: {
+    en: ['to column', 'in column', 'into column', 'column only', 'just column', 'only in'],
+    vi: ['vào cột', 'trong cột', 'cột duy nhất', 'chỉ cột'],
+    es: ['a la columna', 'en columna', 'solo columna'],
+    fr: ['dans la colonne', 'colonne seulement', 'juste colonne'],
+    de: ['in spalte', 'spalte nur', 'nur spalte'],
+    pt: ['na coluna', 'coluna apenas', 'só coluna'],
+    zh: ['到列', '仅列', '只在列'],
+    ja: ['列に', '列だけ', '列のみ'],
+    ko: ['열에', '열만', '열에만'],
+  },
+
+  // Column headers that indicate PURE classification/categorization
+  // These should output a single category, not detailed text
+  // NOTE: Removed "analysis/phân tích" words - those expect detailed text output
+  classificationHeaders: {
+    en: ['sentiment', 'category', 'type', 'class', 'rating', 'score', 'level', 'status',
+         'classify', 'categorize', 'grade', 'tier', 'rank', 'label', 'tag'],
+    vi: ['phân loại', 'loại', 'hạng', 'cảm xúc', 'điểm', 'mức', 'thứ hạng', 'nhãn',
+         'tình cảm', 'thái độ', 'mức độ', 'xếp loại'],
+    es: ['sentimiento', 'categoría', 'tipo', 'clasificación', 'puntuación', 'nivel',
+         'calificación', 'etiqueta', 'rango'],
+    fr: ['sentiment', 'catégorie', 'type', 'classification', 'note', 'niveau',
+         'étiquette', 'rang'],
+    de: ['stimmung', 'kategorie', 'typ', 'klassifizierung', 'note', 'niveau',
+         'kennzeichnung', 'rang'],
+    pt: ['sentimento', 'categoria', 'tipo', 'classificação', 'nota', 'nível',
+         'etiqueta', 'ranking'],
+    zh: ['情感', '类别', '分类', '评分', '等级', '标签', '级别'],
+    ja: ['感情', 'カテゴリ', '分類', 'スコア', 'レベル', 'ラベル', 'ランク'],
+    ko: ['감정', '카테고리', '분류', '점수', '레벨', '라벨', '등급'],
+    ru: ['настроение', 'категория', 'тип', 'классификация', 'оценка', 'уровень'],
+    ar: ['المشاعر', 'الفئة', 'النوع', 'التصنيف', 'الدرجة', 'المستوى'],
+    hi: ['भावना', 'श्रेणी', 'प्रकार', 'वर्गीकरण', 'स्कोर', 'स्तर'],
+    th: ['ความรู้สึก', 'หมวดหมู่', 'ประเภท', 'การจำแนก', 'คะแนน', 'ระดับ'],
+    id: ['sentimen', 'kategori', 'jenis', 'klasifikasi', 'skor', 'level'],
+  },
+};
+
+/**
+ * Default classification options by language
+ * Used as placeholder suggestions when user needs to categorize data
+ */
+const I18N_CLASSIFICATION_OPTIONS = {
+  en: 'Good, Bad, Neutral',
+  vi: 'Tốt, Xấu, Bình thường',
+  es: 'Bueno, Malo, Neutral',
+  fr: 'Bon, Mauvais, Neutre',
+  de: 'Gut, Schlecht, Neutral',
+  pt: 'Bom, Ruim, Neutro',
+  zh: '好, 坏, 中性',
+  ja: '良い, 悪い, 普通',
+  ko: '좋음, 나쁨, 보통',
+  ru: 'Хорошо, Плохо, Нейтрально',
+  ar: 'جيد, سيء, محايد',
+  hi: 'अच्छा, बुरा, तटस्थ',
+  th: 'ดี, ไม่ดี, ปานกลาง',
+  id: 'Baik, Buruk, Netral',
+};
+
+/**
+ * Yes/No options by language (for binary classification)
+ */
+const I18N_YESNO_OPTIONS = {
+  en: 'Yes, No',
+  vi: 'Có, Không',
+  es: 'Sí, No',
+  fr: 'Oui, Non',
+  de: 'Ja, Nein',
+  pt: 'Sim, Não',
+  zh: '是, 否',
+  ja: 'はい, いいえ',
+  ko: '예, 아니오',
+  ru: 'Да, Нет',
+  ar: 'نعم, لا',
+  hi: 'हाँ, नहीं',
+  th: 'ใช่, ไม่ใช่',
+  id: 'Ya, Tidak',
+};
+
+/**
+ * Check if input text matches any pattern for a given intent
+ * @param {string} input - User's command (lowercase)
+ * @param {string} intent - Intent key from I18N_PATTERNS
+ * @returns {boolean} True if matches any pattern
+ */
+function matchesIntent(input, intent) {
+  const patterns = I18N_PATTERNS[intent];
+  if (!patterns) return false;
+  
+  for (const lang in patterns) {
+    for (const pattern of patterns[lang]) {
+      if (input.includes(pattern.toLowerCase())) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if input matches fill all / multi-column intent
+ * @param {string} input - User's command (lowercase)
+ * @returns {boolean}
+ */
+function isFillAllCommand(input) {
+  return matchesIntent(input, 'fillAll');
+}
+
+/**
+ * Check if input indicates a single-column specific command
+ * @param {string} input - User's command (lowercase)
+ * @returns {boolean}
+ */
+function isSingleColumnCommand(input) {
+  // Check for explicit column letter patterns like "to C", "in column D"
+  const hasColumnLetter = (
+    input.match(/\bto\s+(?:column\s+)?[a-z]\b/i) ||
+    input.match(/\binto\s+(?:column\s+)?[a-z]\b/i) ||
+    input.match(/\bput\s+(?:in\s+)?(?:column\s+)?[a-z]\b/i) ||
+    input.match(/\bcolumn\s+[a-z]\s*$/i) ||
+    input.match(/\bcột\s+[a-z]\b/i) ||
+    input.match(/\b列[a-z]\b/i)
+  );
+  
+  if (hasColumnLetter) return true;
+  
+  return matchesIntent(input, 'singleColumn');
+}
+
+/**
+ * Detect task type from user command
+ * @param {string} input - User's command (lowercase)
+ * @returns {string} Task type: 'translate', 'summarize', 'sentiment', 'extract', 'classify', 'custom'
+ */
+function detectTaskType(input) {
+  if (matchesIntent(input, 'translate')) return 'translate';
+  if (matchesIntent(input, 'summarize')) return 'summarize';
+  if (matchesIntent(input, 'sentiment')) return 'sentiment';
+  if (matchesIntent(input, 'extract')) return 'extract';
+  if (matchesIntent(input, 'classify')) return 'classify';
+  return 'custom';
+}
+
+/**
+ * Words that indicate the header expects detailed TEXT output, not classification
+ * If a header contains these, it should NOT be treated as classification even
+ * if it also contains classification-like words (e.g., "Phân tích đánh giá")
+ */
+const ANALYSIS_HEADER_PATTERNS = {
+  en: ['analysis', 'summary', 'description', 'explain', 'detail', 'overview', 'report', 'insight'],
+  vi: ['phân tích', 'tóm tắt', 'mô tả', 'giải thích', 'chi tiết', 'tổng quan', 'báo cáo', 'nhận định'],
+  es: ['análisis', 'resumen', 'descripción', 'explicar', 'detalle', 'informe'],
+  fr: ['analyse', 'résumé', 'description', 'expliquer', 'détail', 'rapport'],
+  de: ['analyse', 'zusammenfassung', 'beschreibung', 'erklärung', 'detail', 'bericht'],
+  pt: ['análise', 'resumo', 'descrição', 'explicar', 'detalhe', 'relatório'],
+  zh: ['分析', '总结', '描述', '解释', '详情', '报告'],
+  ja: ['分析', '要約', '説明', '詳細', 'レポート'],
+  ko: ['분석', '요약', '설명', '상세', '보고서'],
+};
+
+/**
+ * Check if header suggests detailed text output (not classification)
+ */
+function isAnalysisHeader(header) {
+  const lower = header.toLowerCase();
+  for (const lang in ANALYSIS_HEADER_PATTERNS) {
+    for (const pattern of ANALYSIS_HEADER_PATTERNS[lang]) {
+      if (lower.includes(pattern.toLowerCase())) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if a column header indicates classification/sentiment type
+ * Used to determine which columns should receive classification format options
+ * 
+ * STRICT MATCHING: Header must START with or BE a classification keyword.
+ * Generic headers like "Relevance to Product Quality" should NOT match -
+ * let the AI decide the appropriate output format based on context.
+ * 
+ * @param {string} header - Column header text
+ * @returns {boolean}
+ */
+function isClassificationHeader(header) {
+  const lower = header.toLowerCase().trim();
+  
+  // If it's an analysis-type header, it's NOT classification
+  if (isAnalysisHeader(header)) {
+    return false;
+  }
+  
+  // STRICT matching: header must START with a classification keyword
+  // This prevents false positives like "Relevance to Product Quality"
+  const classificationPatterns = I18N_PATTERNS.classificationHeaders;
+  if (!classificationPatterns) return false;
+  
+  for (const lang in classificationPatterns) {
+    for (const pattern of classificationPatterns[lang]) {
+      const patternLower = pattern.toLowerCase();
+      // Match if header STARTS with keyword or IS the keyword (with possible suffix)
+      if (lower.startsWith(patternLower) || 
+          lower === patternLower ||
+          lower.startsWith(patternLower + ' ')) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Get all supported languages
+ * @returns {string[]} Array of language codes
+ */
+function getSupportedLanguages() {
+  return Object.keys(I18N_PATTERNS.fillAll);
+}
+
+/**
+ * Detect the likely language of the input
+ * @param {string} input - User's command
+ * @returns {string} Language code (best guess)
+ */
+function detectInputLanguage(input) {
+  // Simple heuristics based on character sets and common words
+  if (/[\u4e00-\u9fff]/.test(input)) return 'zh'; // Chinese characters
+  if (/[\u3040-\u309f\u30a0-\u30ff]/.test(input)) return 'ja'; // Japanese hiragana/katakana
+  if (/[\uac00-\ud7af]/.test(input)) return 'ko'; // Korean hangul
+  if (/[\u0600-\u06ff]/.test(input)) return 'ar'; // Arabic
+  if (/[\u0900-\u097f]/.test(input)) return 'hi'; // Hindi Devanagari
+  if (/[\u0e00-\u0e7f]/.test(input)) return 'th'; // Thai
+  if (/[\u0400-\u04ff]/.test(input)) return 'ru'; // Cyrillic (Russian)
+  
+  // Check for Vietnamese diacritics
+  if (/[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]/i.test(input)) {
+    return 'vi';
+  }
+  
+  // Check for Spanish/Portuguese specific
+  if (/[ñ¿¡]/i.test(input)) return 'es';
+  if (/[ãõç]/i.test(input)) return 'pt';
+  
+  // Check for German specific
+  if (/[äöüß]/i.test(input)) return 'de';
+  
+  // Check for French specific
+  if (/[œæ]/i.test(input) || /\b(le|la|les|un|une|des|du|de)\b/i.test(input)) return 'fr';
+  
+  // Default to English
+  return 'en';
+}
+
+/**
+ * Get classification options for a given language
+ * @param {string} lang - Language code (e.g., 'en', 'vi', 'es')
+ * @returns {string} Comma-separated classification options
+ */
+function getClassificationOptions(lang) {
+  return I18N_CLASSIFICATION_OPTIONS[lang] || I18N_CLASSIFICATION_OPTIONS.en;
+}
+
+/**
+ * Get yes/no options for a given language
+ * @param {string} lang - Language code
+ * @returns {string} Comma-separated yes/no options
+ */
+function getYesNoOptions(lang) {
+  return I18N_YESNO_OPTIONS[lang] || I18N_YESNO_OPTIONS.en;
+}
+
+/**
+ * Get classification options based on detected language from text
+ * Convenience function that combines language detection with option lookup
+ * @param {string} text - Text to analyze for language detection
+ * @returns {string} Comma-separated classification options in detected language
+ */
+function getClassificationOptionsFromText(text) {
+  const lang = detectInputLanguage(text);
+  return getClassificationOptions(lang);
+}
+
+console.log('🌍 i18n module loaded - supporting', getSupportedLanguages().length, 'languages');
+</script>

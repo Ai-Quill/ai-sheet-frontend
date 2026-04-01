@@ -1,0 +1,257 @@
+<!--
+  @file Sidebar_Agent_Context.html
+  @version 1.0.0
+  @updated 2026-01-15
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-15): Initial context indicator UI
+  
+  ============================================
+  SIDEBAR_AGENT_CONTEXT - Context Visibility
+  ============================================
+  
+  Contains:
+  - Context indicator showing what agent sees
+  - Expandable context panel
+  - Data preview (sample rows)
+  - Refresh context functionality
+  
+  Included by: Sidebar_Agent.html
+  Depends on: Sidebar_Agent_Core.html, Sidebar_Agent_UI.html
+-->
+
+<script>
+// ============================================
+// CONTEXT VISIBILITY STATE
+// ============================================
+
+let contextExpanded = false;
+
+// ============================================
+// CONTEXT INDICATOR
+// ============================================
+
+/**
+ * Render a compact context indicator
+ * Shows what the agent currently "sees"
+ */
+function renderContextIndicator() {
+  if (!currentSelectionContext) return;
+  
+  const ctx = currentSelectionContext;
+  const info = ctx.selectionInfo || {};
+  
+  // Build context summary
+  const rowCount = info.numRows || info.rowCount || 0;
+  const colCount = info.columnsWithData?.length || ctx.headers?.length || 0;
+  const sheetName = ctx.sheetName || 'Sheet';
+  const range = info.range || ctx.selectedRange || '';
+  
+  // Check for headers - use selectionInfo.headers array or ctx.headerRow
+  const headersArray = info.headers || ctx.headers || [];
+  const headerRowObj = ctx.headerRow || {};
+  const hasHeaders = headersArray.some(h => h?.name) || Object.keys(headerRowObj).length > 0;
+  
+  // Get header names from selectionInfo.headers (array of {column, name}) or headerRow (object)
+  let headerNames = [];
+  if (headersArray.length > 0 && headersArray[0]?.name) {
+    headerNames = headersArray.filter(h => h?.name).map(h => h.name).slice(0, 3);
+  } else if (Object.keys(headerRowObj).length > 0) {
+    headerNames = Object.values(headerRowObj).filter(h => h).slice(0, 3);
+  }
+  
+  const headersPreview = headerNames.length > 0 
+    ? headerNames.join(', ') + (headerNames.length < colCount ? '...' : '')
+    : 'No headers';
+  
+  const html = `
+    <div class="context-indicator border border-gray-200 rounded-lg text-[11px] mt-2" data-type="context-indicator">
+      <button onclick="toggleContextPanel()" 
+              class="w-full flex items-center justify-between px-2 py-1.5 hover:bg-gray-50 transition-colors rounded-t-lg">
+        <div class="flex items-center gap-1.5">
+          <span class="text-xs">👁️</span>
+          <span class="text-gray-600">Agent sees:</span>
+          <span class="font-medium text-gray-800">${rowCount} rows</span>
+          <span class="text-gray-400">×</span>
+          <span class="font-medium text-gray-800">${colCount} cols</span>
+        </div>
+        <span id="contextChevron" class="text-gray-400 transition-transform ${contextExpanded ? 'rotate-180' : ''}">▼</span>
+      </button>
+      
+      <div id="contextPanel" class="${contextExpanded ? '' : 'hidden'} border-t border-gray-100 bg-gray-50 rounded-b-lg">
+        <div class="p-2 space-y-1.5">
+          <!-- Sheet & Range -->
+          <div class="flex items-center gap-2">
+            <span class="text-gray-500 w-14">Sheet:</span>
+            <span class="font-mono text-gray-700 bg-white px-1.5 py-0.5 rounded border border-gray-100">${escapeHtml(sheetName)}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-gray-500 w-14">Range:</span>
+            <span class="font-mono text-gray-700 bg-white px-1.5 py-0.5 rounded border border-gray-100">${escapeHtml(range)}</span>
+          </div>
+          
+          <!-- Headers -->
+          <div class="flex items-center gap-2">
+            <span class="text-gray-500 w-14">Headers:</span>
+            <span class="text-gray-700 truncate flex-1">${hasHeaders ? '✅ ' + escapeHtml(headersPreview) : '❌ Not detected'}</span>
+          </div>
+          
+          <!-- Data Preview -->
+          <div class="mt-2">
+            <div class="text-[11px] text-gray-500 uppercase tracking-wide mb-1">Sample Data</div>
+            <div id="contextSampleData" class="bg-white rounded border border-gray-100 p-1.5 max-h-20 overflow-y-auto font-mono text-[11px]">
+              ${renderSampleDataPreview(ctx.sampleData)}
+            </div>
+          </div>
+          
+          <!-- Refresh Button -->
+          <div class="flex justify-end mt-1">
+            <button onclick="refreshContext()" 
+                    class="text-[11px] text-blue-600 hover:text-blue-700 flex items-center gap-1">
+              <span>↻</span> Refresh context
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  // Find or create container - insert at start of messages
+  const messagesDiv = document.getElementById('agentMessages');
+  const existing = messagesDiv.querySelector('[data-type="context-indicator"]');
+  
+  if (existing) {
+    existing.outerHTML = html;
+  } else {
+    // Insert at the beginning of messages div
+    messagesDiv.insertAdjacentHTML('afterbegin', html);
+  }
+}
+
+/**
+ * Render sample data preview
+ */
+function renderSampleDataPreview(sampleData) {
+  if (!sampleData) {
+    return '<span class="text-gray-400">No sample data</span>';
+  }
+  
+  // Handle object format: { A: [...], B: [...] }
+  if (typeof sampleData === 'object' && !Array.isArray(sampleData)) {
+    const cols = Object.keys(sampleData);
+    if (cols.length === 0) {
+      return '<span class="text-gray-400">No sample data</span>';
+    }
+    
+    return cols.slice(0, 4).map(col => {
+      const values = sampleData[col];
+      const preview = Array.isArray(values) 
+        ? values.slice(0, 2).map(v => escapeHtml(String(v).substring(0, 15))).join(', ')
+        : escapeHtml(String(values).substring(0, 30));
+      return `<div class="truncate text-gray-600"><span class="text-gray-400">${col}:</span> ${preview}</div>`;
+    }).join('');
+  }
+  
+  // Handle array format
+  if (!Array.isArray(sampleData) || sampleData.length === 0) {
+    return '<span class="text-gray-400">No sample data</span>';
+  }
+  
+  // Show first 3 rows
+  const preview = sampleData.slice(0, 3).map((row, idx) => {
+    const cells = Array.isArray(row) 
+      ? row.slice(0, 4).map(c => escapeHtml(String(c).substring(0, 20))).join(' | ')
+      : escapeHtml(String(row).substring(0, 60));
+    return `<div class="truncate text-gray-600">${idx + 1}. ${cells}</div>`;
+  }).join('');
+  
+  return preview;
+}
+
+/**
+ * Toggle context panel visibility
+ */
+function toggleContextPanel() {
+  contextExpanded = !contextExpanded;
+  
+  const panel = document.getElementById('contextPanel');
+  const chevron = document.getElementById('contextChevron');
+  
+  if (panel) {
+    panel.classList.toggle('hidden', !contextExpanded);
+  }
+  if (chevron) {
+    chevron.classList.toggle('rotate-180', contextExpanded);
+  }
+  
+  // Track event
+  if (typeof logActionEvent === 'function') {
+    logActionEvent('context_toggle', contextExpanded ? 'expand' : 'collapse');
+  }
+}
+
+/**
+ * Refresh context from current selection
+ */
+function refreshContext() {
+  showToast('Refreshing context...', 'info');
+  
+  // Track event
+  if (typeof logActionEvent === 'function') {
+    logActionEvent('context_refresh', 'manual');
+  }
+  
+  // Reset suggestions
+  if (typeof clearSuggestionsState === 'function') {
+    clearSuggestionsState();
+  }
+  
+  // Re-capture selection
+  if (typeof captureSelection === 'function') {
+    captureSelection(true);
+  }
+  
+  // Re-render context indicator after capture
+  setTimeout(renderContextIndicator, 500);
+}
+
+// ============================================
+// HOOK INTO CAPTURE SELECTION
+// ============================================
+
+// NOTE: Auto-rendering of expandable context indicator is DISABLED
+// The sticky selection row (above input) now shows dimensions (rows × cols)
+// The expandable indicator is still available via renderContextIndicator() 
+// if needed for detailed debugging (sample data, headers, etc.)
+
+// To re-enable, uncomment below:
+/*
+const originalUpdateSelectionIndicator = typeof updateSelectionIndicator !== 'undefined' 
+  ? updateSelectionIndicator 
+  : null;
+
+if (originalUpdateSelectionIndicator) {
+  updateSelectionIndicator = function(context) {
+    originalUpdateSelectionIndicator(context);
+    setTimeout(renderContextIndicator, 100);
+  };
+}
+*/
+
+// ============================================
+// MODULE LOADED
+// ============================================
+
+console.log('📦 Agent Context module loaded');
+</script>
+
+<style>
+.context-indicator {
+  background: white;
+}
+
+.context-indicator .rotate-180 {
+  transform: rotate(180deg);
+}
+</style>

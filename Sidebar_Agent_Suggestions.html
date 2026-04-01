@@ -1,0 +1,380 @@
+<!--
+  @file Sidebar_Agent_Suggestions.html
+  @version 1.1.0
+  @updated 2026-01-18
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.1.0 (2026-01-18): Enhanced proactive suggestions with confidence UI
+    - Shows confidence indicators (high/medium)
+    - Displays pattern-based reasoning
+    - Context-aware suggestion cards
+  - 1.0.0 (2026-01-15): Initial proactive suggestions UI
+  
+  ============================================
+  SIDEBAR_AGENT_SUGGESTIONS - Proactive AI
+  ============================================
+  
+  Contains:
+  - Data analysis on tab load
+  - Pattern-based suggestion rendering with confidence
+  - One-click action execution
+  - Context-aware feedback
+  
+  Included by: Sidebar_Agent.html
+  Depends on: Sidebar_Agent_Core.html, AgentAnalyzer.gs
+-->
+
+<script>
+// ============================================
+// SUGGESTIONS STATE
+// ============================================
+
+let currentSuggestions = [];
+let analysisResults = null;
+let suggestionsShown = false;
+let suggestionsJustRendered = false;  // Prevent immediate collapse
+
+// ============================================
+// ANALYZE ON LOAD
+// ============================================
+
+/**
+ * Analyze data when agent tab opens
+ * NOTE: Initial suggestions on load are now DISABLED
+ * We show "What's next?" suggestions AFTER task completion instead (better UX flow)
+ * 
+ * Called after selection is captured
+ */
+function analyzeDataOnLoad() {
+  // DISABLED: Initial suggestions clutter the UI
+  // "What's next?" suggestions appear after task completion in showNextActionSuggestions()
+  console.log('[Suggestions] Initial analysis disabled - using post-completion suggestions instead');
+  return;
+  
+  // Original code kept for reference:
+  /*
+  if (suggestionsShown || !currentSelectionContext) {
+    return;
+  }
+  
+  console.log('[Suggestions] Analyzing data...', currentSelectionContext?.sheetName);
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      console.log('[Suggestions] Analysis result:', result);
+      
+      if (result && result.suggestions && result.suggestions.length > 0) {
+        console.log('[Suggestions] Got', result.suggestions.length, 'suggestions:', 
+          result.suggestions.map(s => s.title || s.command).join(', '));
+        analysisResults = result.analysis;
+        renderSuggestions(result.suggestions);
+        suggestionsShown = true;
+      } else {
+        console.log('[Suggestions] No suggestions returned from analyzer');
+      }
+    })
+    .withFailureHandler(function(err) {
+      console.error('[Suggestions] Analysis failed:', err);
+    })
+    .analyzeDataForSuggestions(currentSelectionContext);
+  */
+}
+
+// ============================================
+// RENDER SUGGESTIONS
+// ============================================
+
+/**
+ * Render suggestion cards in the agent messages area
+ * Enhanced with confidence indicators and pattern-based reasoning
+ * 
+ * @param {Array} suggestions - List of suggestions from analyzer
+ */
+function renderSuggestions(suggestions) {
+  console.log('[Suggestions] renderSuggestions called with', suggestions?.length, 'suggestions');
+  
+  if (!suggestions || suggestions.length === 0) {
+    console.log('[Suggestions] No suggestions to render');
+    return;
+  }
+  
+  // Filter actionable suggestions (skip formula-only)
+  const actionableSuggestions = suggestions
+    .filter(s => s.type !== 'formula' && s.command)
+    .slice(0, 3);
+  
+  console.log('[Suggestions] After filtering:', actionableSuggestions.length, 'actionable suggestions');
+  console.log('[Suggestions] Filtered out:', suggestions.filter(s => s.type === 'formula' || !s.command).map(s => s.title || s.type));
+  
+  if (actionableSuggestions.length === 0) {
+    console.log('[Suggestions] No actionable suggestions after filtering');
+    return;
+  }
+  
+  // Store for click handling
+  currentSuggestions = actionableSuggestions;
+  
+  const suggestionsHtml = actionableSuggestions.map((s, idx) => {
+    // Confidence indicator
+    const confidence = s.confidence || 0;
+    const confidenceClass = confidence >= 0.8 ? 'suggestion-confidence-high' : 
+                            confidence >= 0.6 ? 'suggestion-confidence-medium' : '';
+    const confidenceLabel = confidence >= 0.8 ? 'High match' : 
+                            confidence >= 0.6 ? 'Good match' : '';
+    
+    // Pattern-based reason hint
+    const reasonHint = s.reason && s.type === 'proactive' ? 
+      `<div class="text-[11px] text-gray-400 mt-0.5">${escapeHtml(s.reason)}</div>` : '';
+    
+    return `
+      <div class="suggestion-card-enhanced flex items-start gap-2 py-2 px-3 cursor-pointer hover:bg-blue-50 rounded-lg transition-colors" 
+           onclick="executeSuggestion(${idx})"
+           data-suggestion-idx="${idx}">
+        <span class="text-base flex-shrink-0">${s.icon || '✨'}</span>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2">
+            <span class="text-[11px] font-medium text-gray-800">${escapeHtml(s.title)}</span>
+            ${confidenceLabel ? `<span class="suggestion-confidence ${confidenceClass}">${confidenceLabel}</span>` : ''}
+          </div>
+          <div class="text-[11px] text-gray-500 truncate">${escapeHtml(s.description)}</div>
+          ${reasonHint}
+        </div>
+        <span class="text-[11px] text-blue-500 hover:text-blue-600 font-medium whitespace-nowrap">Run →</span>
+      </div>
+    `;
+  }).join('');
+  
+  // Header with analysis source
+  const hasPatternSuggestions = actionableSuggestions.some(s => s.type === 'proactive');
+  const headerSubtext = hasPatternSuggestions ? 
+    '<span class="text-[11px] text-amber-600 font-normal ml-1">Based on your data</span>' : '';
+  
+  const cardHtml = `
+    <div class="card p-2 bg-gradient-to-br from-amber-50 to-orange-50 border-amber-200" data-type="suggestions">
+      <div class="flex items-center gap-2 mb-2 px-1">
+        <span class="text-sm">💡</span>
+        <span class="text-[11px] font-semibold text-amber-900">What you can do next</span>
+        ${headerSubtext}
+      </div>
+      <div class="bg-white rounded-lg border border-amber-100 divide-y divide-amber-50">
+        ${suggestionsHtml}
+      </div>
+    </div>
+  `;
+  
+  // Insert after welcome message
+  const messagesDiv = document.getElementById('agentMessages');
+  const welcomeCard = messagesDiv.querySelector('[data-type="welcome"]');
+  
+  if (welcomeCard) {
+    welcomeCard.insertAdjacentHTML('afterend', cardHtml);
+  } else {
+    messagesDiv.insertAdjacentHTML('beforeend', cardHtml);
+  }
+  
+  autoScrollMessages();
+  
+  // Prevent immediate collapse - give user time to see suggestions
+  suggestionsJustRendered = true;
+  setTimeout(function() {
+    suggestionsJustRendered = false;
+  }, 2000);  // 2 second grace period
+  
+  console.log('[Suggestions] Rendered suggestions card, 2s grace period before collapse allowed');
+}
+
+/**
+ * Execute a suggestion - runs the AI command
+ * Formula-first approach kicks in AFTER AI processes and learns patterns
+ * 
+ * @param {number} idx - Suggestion index
+ */
+function executeSuggestion(idx) {
+  const suggestion = currentSuggestions[idx];
+  if (!suggestion || !suggestion.command) {
+    console.error('[Suggestions] Invalid suggestion at index:', idx);
+    return;
+  }
+  
+  console.log('[Suggestions] Running:', suggestion.command);
+  
+  // Track event
+  if (typeof logActionEvent === 'function') {
+    logActionEvent('suggestion_click', suggestion.command.split(' ')[0]);
+  }
+  
+  // Remove suggestion card
+  const suggestionsCard = document.querySelector('[data-type="suggestions"]');
+  if (suggestionsCard) {
+    suggestionsCard.remove();
+  }
+  
+  // Set command in input and execute
+  const input = document.getElementById('agentInput');
+  if (input) {
+    input.value = suggestion.command;
+  }
+  
+  processAgentCommand(suggestion.command);
+}
+
+/**
+ * Dismiss suggestions card
+ */
+function dismissSuggestions() {
+  const suggestionsCard = document.querySelector('[data-type="suggestions"]');
+  if (suggestionsCard) {
+    suggestionsCard.remove();
+  }
+}
+
+// ============================================
+// SMART WELCOME MESSAGE
+// ============================================
+
+/**
+ * Enhanced welcome message with data insights
+ * Called when no suggestions but has context
+ */
+function renderSmartWelcome() {
+  if (!currentSelectionContext) return;
+  
+  const rowCount = currentSelectionContext.selectionInfo?.rowCount || 0;
+  const colCount = currentSelectionContext.headers?.length || 0;
+  
+  let insightText = '';
+  
+  if (rowCount > 0 && colCount > 0) {
+    insightText = `📊 ${rowCount} rows × ${colCount} columns`;
+  }
+  
+  // Update selection indicator if exists
+  const indicator = document.getElementById('selectionIndicator');
+  if (indicator && insightText) {
+    indicator.innerHTML = insightText;
+  }
+}
+
+// ============================================
+// REFRESH SUGGESTIONS
+// ============================================
+
+/**
+ * Refresh suggestions (for manual trigger)
+ */
+function refreshSuggestions() {
+  suggestionsShown = false;
+  currentSuggestions = [];
+  analysisResults = null;
+  
+  // Remove existing suggestions card
+  const suggestionsCard = document.querySelector('[data-type="suggestions"]');
+  if (suggestionsCard) {
+    suggestionsCard.remove();
+  }
+  
+  // Re-analyze
+  analyzeDataOnLoad();
+  showToast('Analyzing data...', 'info');
+}
+
+// ============================================
+// CLEANUP
+// ============================================
+
+/**
+ * Clear suggestions state on new conversation
+ */
+function clearSuggestionsState() {
+  currentSuggestions = [];
+  analysisResults = null;
+  suggestionsShown = false;
+}
+
+// Hook into startNewConversation if it exists
+if (typeof startNewConversation !== 'undefined') {
+  const originalStartNew = startNewConversation;
+  startNewConversation = function() {
+    clearSuggestionsState();
+    originalStartNew();
+  };
+}
+
+// ============================================
+// AUTO-COLLAPSE ON INPUT
+// ============================================
+
+/**
+ * Called when user types in the agent input
+ * Collapses Quick Actions to give more space for conversation
+ * 
+ * @param {Event} e - Input event
+ */
+function onAgentInputChange(e) {
+  const value = (e.target.value || '').trim();
+  
+  // Collapse suggestions if user has typed something meaningful (3+ chars)
+  if (value.length >= 3) {
+    collapseSuggestionsCard();
+  }
+}
+
+/**
+ * Collapse (minimize) the suggestions card
+ * User can click to expand again
+ */
+function collapseSuggestionsCard() {
+  // Don't collapse if suggestions were just rendered
+  if (suggestionsJustRendered) {
+    console.log('[Suggestions] Skipping collapse - suggestions just rendered');
+    return;
+  }
+  
+  const suggestionsCard = document.querySelector('[data-type="suggestions"]');
+  if (!suggestionsCard || suggestionsCard.classList.contains('collapsed')) return;
+  
+  console.log('[Suggestions] Collapsing Quick Actions panel');
+  
+  // Add collapsed state
+  suggestionsCard.classList.add('collapsed');
+  
+  // Store original content for potential restore
+  const originalContent = suggestionsCard.innerHTML;
+  suggestionsCard.dataset.originalContent = originalContent;
+  
+  // Replace with compact version
+  const count = currentSuggestions.length || 0;
+  suggestionsCard.innerHTML = `
+    <div class="flex items-center justify-between px-2 py-1.5 cursor-pointer" onclick="expandSuggestionsCard()">
+      <div class="flex items-center gap-2">
+        <span class="text-sm">💡</span>
+        <span class="text-[11px] text-amber-700">${count} Quick Actions available</span>
+      </div>
+      <span class="text-[11px] text-amber-600">▼ Show</span>
+    </div>
+  `;
+}
+
+/**
+ * Expand the collapsed suggestions card
+ */
+function expandSuggestionsCard() {
+  const suggestionsCard = document.querySelector('[data-type="suggestions"]');
+  if (!suggestionsCard || !suggestionsCard.classList.contains('collapsed')) return;
+  
+  console.log('[Suggestions] Expanding Quick Actions panel');
+  
+  // Restore original content
+  if (suggestionsCard.dataset.originalContent) {
+    suggestionsCard.innerHTML = suggestionsCard.dataset.originalContent;
+    suggestionsCard.classList.remove('collapsed');
+  }
+}
+
+// ============================================
+// MODULE LOADED
+// ============================================
+
+console.log('📦 Agent Suggestions module loaded');
+</script>

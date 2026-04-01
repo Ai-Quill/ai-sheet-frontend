@@ -1,0 +1,404 @@
+<!--
+  @file Sidebar_Agent_TaskChain_UI.html
+  @version 1.0.0
+  @created 2026-02-05
+  
+  TASK CHAIN - UI Rendering Module
+  
+  Contains:
+  - Parsing progress UI
+  - Chain confirmation UI
+  - Progress visualization
+  - Suggested actions UI
+  
+  Depends on: Sidebar_Agent_TaskChain_State.html, Sidebar_Agent_TaskChain_Validation.html
+-->
+
+<script>
+// ============================================
+// PARSING PROGRESS UI
+// ============================================
+
+/**
+ * Show enhanced parsing progress indicator
+ * @param {string} initialText - Initial progress text
+ */
+function showParsingProgress(initialText) {
+  const html = `
+    <div class="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg border border-blue-100" data-type="thinking">
+      <div class="relative">
+        <div class="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full"></div>
+      </div>
+      <div class="flex-1">
+        <div class="text-[11px] font-medium text-blue-700" id="parsingProgressText">${initialText}</div>
+        <div class="text-[11px] text-blue-500 mt-0.5">AI is processing your command</div>
+      </div>
+      <div class="flex gap-0.5" id="parsingProgressDots">
+        <span class="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse"></span>
+        <span class="w-1.5 h-1.5 bg-blue-300 rounded-full animate-pulse" style="animation-delay: 0.2s"></span>
+        <span class="w-1.5 h-1.5 bg-blue-200 rounded-full animate-pulse" style="animation-delay: 0.4s"></span>
+      </div>
+    </div>
+  `;
+  
+  const messagesDiv = document.getElementById('agentMessages');
+  if (messagesDiv) {
+    messagesDiv.insertAdjacentHTML('beforeend', html);
+    autoScrollMessages();
+  }
+}
+
+/**
+ * Update parsing progress text
+ * @param {string} text - New progress text
+ */
+function updateParsingProgress(text) {
+  const progressText = document.getElementById('parsingProgressText');
+  if (progressText) {
+    progressText.textContent = text;
+    progressText.classList.add('transition-all');
+  }
+}
+
+/**
+ * Remove parsing progress indicator
+ */
+function removeParsingProgress() {
+  const thinkingMsg = document.querySelector('[data-type="thinking"]');
+  if (thinkingMsg) thinkingMsg.remove();
+}
+
+// ============================================
+// CHAIN CONFIRMATION UI
+// ============================================
+
+/**
+ * Render the chain confirmation UI
+ * Shows user the detected steps and asks for confirmation
+ * 
+ * @param {Object} chain - Parsed task chain
+ */
+function renderChainConfirmation(chain) {
+  // Display in messages area instead of separate modal
+  const messagesDiv = document.getElementById('agentMessages');
+  if (!messagesDiv) return;
+  
+  const stepsHtml = chain.steps.map((step, idx) => `
+    <div class="flex items-start gap-2 py-1.5 ${idx > 0 ? 'border-t border-gray-100' : ''}">
+      <span class="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[11px] font-bold flex-shrink-0">
+        ${idx + 1}
+      </span>
+      <div class="flex-1 min-w-0">
+        <div class="text-[11px] font-medium text-gray-800">${escapeHtml(step.description)}</div>
+        <div class="text-[11px] text-gray-500">${getActionIcon(step.action)} ${step.action}</div>
+      </div>
+    </div>
+  `).join('');
+  
+  // Estimate time (2 minutes per step as rough estimate)
+  const estimatedMinutes = Math.max(1, Math.ceil(chain.steps.length * 2));
+  
+  const html = `
+    <div class="bg-gradient-to-br from-purple-50 to-indigo-50 rounded-lg p-3 border border-purple-100" data-type="chain-confirmation">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="text-lg">🔄</span>
+        <span class="text-[12px] font-semibold text-purple-800">Multi-Step Task Detected</span>
+      </div>
+      <p class="text-[11px] text-gray-600 mb-3">${escapeHtml(chain.summary || 'Ready to execute the following steps:')}</p>
+      <div class="bg-white rounded-md p-2 mb-3 max-h-48 overflow-y-auto">
+        ${stepsHtml}
+      </div>
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-[11px] text-gray-500">⏱ ~${estimatedMinutes} minutes</span>
+        <span class="text-[11px] text-gray-500">${chain.steps.length} steps</span>
+      </div>
+      <label class="flex items-center gap-2 mb-3 cursor-pointer">
+        <input type="checkbox" id="addHeadersCheckbox" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500" checked>
+        <span class="text-[11px] text-gray-600">Add column headers</span>
+      </label>
+      <div class="flex gap-2">
+        <button onclick="executeChain()" class="flex-1 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-md text-[11px] font-medium hover:opacity-90 transition-opacity flex items-center justify-center gap-1" id="runChainBtn">
+          <span>▶</span> Run All Steps
+        </button>
+        <button onclick="cancelChain()" class="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-md text-[11px] hover:bg-gray-50 transition-colors" id="cancelChainBtn">
+          Cancel
+        </button>
+      </div>
+    </div>
+  `;
+  
+  messagesDiv.insertAdjacentHTML('beforeend', html);
+  autoScrollMessages();
+}
+
+/**
+ * Render proposed workflow UI
+ * Special UI when AI understands user's problem and proposes a solution
+ * 
+ * @param {Object} result - AI analysis result with proposed steps
+ */
+function renderProposedWorkflow(result) {
+  const messagesDiv = document.getElementById('agentMessages');
+  if (!messagesDiv) return;
+  
+  // Sheet actions that don't have input/output column flow
+  const sheetActions = ['format', 'filter', 'chart', 'conditionalFormat', 'dataValidation', 'sheetOps', 'writeData', 'table'];
+  
+  // Build steps with appropriate info based on action type
+  const stepsHtml = result.steps.map((step, idx) => {
+    let colInfo;
+    const isSheetAction = sheetActions.includes(step.action);
+    
+    if (step.action === 'analyze') {
+      colInfo = 'Chat';
+    } else if (isSheetAction) {
+      // Sheet actions show range info if available, otherwise just the action icon
+      const range = step.range || step.config?.range || '';
+      colInfo = range ? `Range: ${range}` : '';
+    } else {
+      // AI processing actions show input → output columns
+      const inputCols = step.inputColumns?.join(', ') || result.inputColumn || '?';
+      const outputCol = step.outputColumn || (result.inputColumns ? result.inputColumns[0] : '?');
+      colInfo = `Col ${inputCols} → ${outputCol}`;
+    }
+    
+    return `
+    <div class="flex items-start gap-2 py-1.5 ${idx > 0 ? 'border-t border-gray-100' : ''}" data-step-idx="${idx}">
+      <span class="w-5 h-5 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-[11px] font-bold flex-shrink-0">
+        ${idx + 1}
+      </span>
+      <div class="flex-1 min-w-0">
+        <div class="text-[11px] font-medium text-gray-800">${escapeHtml(step.description)}</div>
+        <div class="flex items-center gap-2 text-[11px] text-gray-500">
+          <span>${getActionIcon(step.action)} ${step.action}</span>
+          ${colInfo ? `<span class="text-gray-400">|</span><span class="font-mono text-[11px] bg-gray-100 px-1 rounded">${colInfo}</span>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+  }).join('');
+  
+  // Estimate time
+  const estimatedMinutes = Math.max(1, Math.ceil(result.steps.length * 2));
+  
+  const html = `
+    <div class="bg-gradient-to-br from-emerald-50 to-teal-50 rounded-lg p-3 border border-emerald-100" data-type="chain-confirmation">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="text-lg">✨</span>
+        <span class="text-[12px] font-semibold text-emerald-800">AI Proposed Workflow</span>
+      </div>
+      <p class="text-[11px] text-gray-600 mb-3">${escapeHtml(result.summary)}</p>
+      
+      <div class="bg-white rounded-md p-2 mb-3 max-h-48 overflow-y-auto">
+        ${stepsHtml}
+      </div>
+      
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-[11px] text-gray-500">⏱ ~${estimatedMinutes} minutes</span>
+        <span class="text-[11px] text-gray-500">${result.steps.length} steps</span>
+      </div>
+      
+      <label class="flex items-center gap-2 mb-3 cursor-pointer">
+        <input type="checkbox" id="addHeadersCheckbox" class="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500" checked>
+        <span class="text-[11px] text-gray-600">Add column headers</span>
+      </label>
+      
+      <div class="flex gap-2">
+        <button onclick="executeChain()" class="flex-1 px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-md text-[11px] font-medium hover:opacity-90 transition-opacity flex items-center justify-center gap-1" id="runChainBtn">
+          <span>▶</span> Run All Steps
+        </button>
+        <button onclick="cancelChain()" class="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-md text-[11px] hover:bg-gray-50 transition-colors" id="cancelChainBtn">
+          Cancel
+        </button>
+      </div>
+    </div>
+  `;
+  
+  messagesDiv.insertAdjacentHTML('beforeend', html);
+  autoScrollMessages();
+}
+
+// ============================================
+// CHAIN PROGRESS UI
+// ============================================
+
+/**
+ * Render the chain progress UI
+ * 
+ * @param {Object} chain - Task chain
+ */
+function renderChainProgress(chain) {
+  const messagesDiv = document.getElementById('agentMessages');
+  if (!messagesDiv) return;
+  
+  // CRITICAL: Before creating new progress elements, invalidate IDs from
+  // any previous chain progress containers to avoid duplicate ID conflicts.
+  // When multiple chains run in a session, getElementById would return the
+  // FIRST matching element (from an old chain) instead of the current one.
+  document.querySelectorAll('[data-type="chain-progress"]').forEach(function(oldContainer) {
+    // Strip IDs from old container and all its children
+    oldContainer.removeAttribute('id');
+    oldContainer.querySelectorAll('[id]').forEach(function(el) {
+      el.removeAttribute('id');
+    });
+  });
+  
+  const stepsHtml = chain.steps.map((step, idx) => `
+    <div class="flex items-center gap-2 py-1" id="chain-step-${idx}">
+      <span class="step-indicator w-4 h-4 rounded-full border-2 border-gray-300 flex items-center justify-center text-[8px]" 
+            id="chain-step-indicator-${idx}">
+        ${idx + 1}
+      </span>
+      <span class="text-[11px] text-gray-600 flex-1">${escapeHtml(step.description)}</span>
+      <span class="step-status text-[11px]" id="chain-step-status-${idx}">⏳</span>
+    </div>
+  `).join('');
+  
+  const html = `
+    <div class="bg-blue-50 rounded-lg p-3 border border-blue-100" data-type="chain-progress" id="chainProgressContainer">
+      <div class="flex items-center gap-2 mb-2" id="chainProgressHeader">
+        <div class="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full" id="chainProgressSpinner"></div>
+        <span class="text-[11px] font-medium text-blue-700" id="chainProgressTitle">Running Task Chain...</span>
+      </div>
+      <div class="space-y-1">
+        ${stepsHtml}
+      </div>
+      <div class="mt-2 text-[11px] text-gray-500" id="chainProgressStatus">
+        Starting execution...
+      </div>
+    </div>
+  `;
+  
+  messagesDiv.insertAdjacentHTML('beforeend', html);
+  autoScrollMessages();
+}
+
+/**
+ * Update chain progress UI
+ * 
+ * @param {Object} chainState - Current chain state
+ */
+function updateChainProgress(chainState) {
+  if (!chainState || !chainState.steps) return;
+  
+  chainState.steps.forEach((step, idx) => {
+    const indicator = document.getElementById(`chain-step-indicator-${idx}`);
+    const status = document.getElementById(`chain-step-status-${idx}`);
+    
+    if (!indicator || !status) return;
+    
+    if (step.status === 'completed') {
+      indicator.className = 'step-indicator w-4 h-4 rounded-full bg-green-500 text-white flex items-center justify-center text-[8px]';
+      indicator.innerHTML = '✓';
+      status.textContent = '✅';
+    } else if (step.status === 'running') {
+      indicator.className = 'step-indicator w-4 h-4 rounded-full bg-blue-500 text-white flex items-center justify-center text-[8px] animate-pulse';
+      status.textContent = '🔄';
+    } else if (step.status === 'error') {
+      indicator.className = 'step-indicator w-4 h-4 rounded-full bg-red-500 text-white flex items-center justify-center text-[8px]';
+      indicator.innerHTML = '✗';
+      status.textContent = '❌';
+    }
+  });
+  
+  // Update overall status
+  const statusEl = document.getElementById('chainProgressStatus');
+  if (statusEl && chainState.currentStep !== undefined) {
+    const completed = chainState.steps.filter(s => s.status === 'completed').length;
+    statusEl.textContent = `Step ${completed}/${chainState.totalSteps} completed`;
+  }
+}
+
+// ============================================
+// SUGGESTED ACTIONS UI
+// ============================================
+
+/**
+ * Render suggested actions using the unified TaskChain confirmation pattern
+ * Converts suggestions to a selectable multi-step format
+ * 
+ * @param {Array} actions - Array of { label, command } objects
+ */
+function renderSuggestedActions(actions) {
+  const messagesDiv = document.getElementById('agentMessages');
+  if (!messagesDiv) return;
+  
+  const actionsHtml = actions.map((action, idx) => `
+    <label class="flex items-start gap-2 py-2 px-2 hover:bg-blue-50 rounded cursor-pointer transition-colors ${idx > 0 ? 'border-t border-gray-100' : ''}">
+      <input type="checkbox" class="suggested-action-checkbox mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500" 
+             data-command="${escapeHtml(action.command)}"
+             data-label="${escapeHtml(action.label)}">
+      <div class="flex-1 min-w-0">
+        <div class="text-[11px] font-medium text-gray-800">${escapeHtml(action.label)}</div>
+        <div class="text-[11px] text-gray-500 truncate">${escapeHtml(action.command)}</div>
+      </div>
+    </label>
+  `).join('');
+  
+  const html = `
+    <div class="bg-gradient-to-br from-amber-50 to-orange-50 rounded-lg p-3 border border-amber-100" data-type="suggested-actions">
+      <div class="flex items-center justify-between mb-2">
+        <div class="flex items-center gap-2">
+          <span class="text-lg">💡</span>
+          <span class="text-[12px] font-semibold text-amber-800">Suggested Actions</span>
+        </div>
+        <button onclick="toggleAllSuggestedActions(true)" class="text-[11px] text-amber-600 hover:underline">Select All</button>
+      </div>
+      <p class="text-[11px] text-gray-600 mb-3">Based on your data, you might want to:</p>
+      <div class="bg-white rounded-md max-h-48 overflow-y-auto">
+        ${actionsHtml}
+      </div>
+      <div class="flex gap-2 mt-3">
+        <button onclick="executeSelectedSuggestedActions()" class="flex-1 px-3 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-md text-[11px] font-medium hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed" id="runSuggestedBtn" disabled>
+          Run Selected
+        </button>
+        <button onclick="dismissSuggestedActions()" class="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-md text-[11px] hover:bg-gray-50 transition-colors">
+          Dismiss
+        </button>
+      </div>
+    </div>
+  `;
+  
+  messagesDiv.insertAdjacentHTML('beforeend', html);
+  autoScrollMessages();
+  
+  // Add change listeners
+  document.querySelectorAll('.suggested-action-checkbox').forEach(cb => {
+    cb.addEventListener('change', updateSuggestedActionsButtons);
+  });
+}
+
+/**
+ * Update buttons based on checkbox selection
+ */
+function updateSuggestedActionsButtons() {
+  const checkboxes = document.querySelectorAll('.suggested-action-checkbox:checked');
+  const runBtn = document.getElementById('runSuggestedBtn');
+  if (runBtn) {
+    runBtn.disabled = checkboxes.length === 0;
+    runBtn.textContent = checkboxes.length > 0 
+      ? `Run ${checkboxes.length} Selected` 
+      : 'Run Selected';
+  }
+}
+
+/**
+ * Toggle all suggested action checkboxes
+ */
+function toggleAllSuggestedActions(checked) {
+  document.querySelectorAll('.suggested-action-checkbox').forEach(cb => {
+    cb.checked = checked;
+  });
+  updateSuggestedActionsButtons();
+}
+
+/**
+ * Dismiss the suggested actions UI
+ */
+function dismissSuggestedActions() {
+  const suggestedEl = document.querySelector('[data-type="suggested-actions"]');
+  if (suggestedEl) suggestedEl.remove();
+}
+
+console.log('📦 Agent TaskChain UI module loaded');
+</script>

@@ -1,0 +1,958 @@
+<!--
+  @file Sidebar_Agent_Execution.html
+  @version 1.2.0
+  @updated 2026-01-18
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.2.0 (2026-01-18): Decision Transparency UI
+    - Added renderDecisionFeedback() - shows WHY formula/AI was chosen
+    - Shows contextual tips based on task type
+    - Visual badge for formula benefit (Auto-updates when data changes)
+  - 1.1.0 (2026-01-14): Empty results warning system
+    - Added user decision modal when AI fails to generate content
+    - Options: Retry Failed, Write Anyway, Skip Empty, Cancel
+    - Configurable threshold (EMPTY_RESULTS_WARNING_THRESHOLD = 10%)
+    - Retry creates mini-job for just failed rows and merges results
+  - 1.0.0 (2026-01-13): Extracted from Sidebar_Agent.html
+    - Plan execution logic
+    - Formula application (direct, conditional)
+    - SSE monitoring and polling fallback
+    - Write queue management
+    - Progress tracking
+  
+  ============================================
+  SIDEBAR_AGENT_EXECUTION - Execution Module
+  ============================================
+  
+  Contains:
+  - setExecuting() - Execution state management
+  - executePlan() - Main execution entry
+  - renderDecisionFeedback() - Decision transparency UI
+  - Formula handling (showFormulaOption, applyFormulaDirectly, etc.)
+  - SSE monitoring (startSSEMonitoring)
+  - Write queue (queueWrite, processWriteQueue)
+  - Progress tracking (updateColumnProgress, showCompletionSummary)
+  - Empty results handling (handleEmptyResultsDecision, retryFailedRowsForColumn)
+  
+  Included by: Sidebar_Agent.html
+-->
+
+<script>
+  // ============================================
+  // PLAN EXECUTION
+  // ============================================
+  
+  let isExecuting = false;  // Prevent double-clicks
+  let executionStartTime = null;
+  
+  // ============================================
+  // RESOURCE TRACKING (for cleanup)
+  // ============================================
+  let activeEventSource = null;
+  let activePollingTimer = null;
+  
+  // Write queue state
+  const writeQueue = [];
+  let isWriting = false;
+  const writtenColumns = new Set();
+  
+  // Pattern learning: collect results for analysis
+  let collectedResults = {
+    outputs: [],
+    inputData: null,
+    headers: [],
+    taskType: '',
+    inputRange: '',
+    outputColumn: ''
+  };
+  
+  /**
+   * Cleanup active connections and timers
+   * Called before starting new execution or when conversation is reset
+   */
+  function cleanupActiveResources() {
+    if (activeEventSource) {
+      console.log('🧹 Closing SSE connection');
+      try { activeEventSource.close(); } catch (e) {}
+      activeEventSource = null;
+    }
+    
+    if (activePollingTimer) {
+      clearInterval(activePollingTimer);
+      activePollingTimer = null;
+    }
+    
+    // Reset write queue state
+    writeQueue.length = 0;
+    writtenColumns.clear();
+    isWriting = false;
+    
+    // Reset pattern learning collection
+    collectedResults = {
+      outputs: [],
+      inputData: null,
+      headers: [],
+      taskType: '',
+      inputRange: '',
+      outputColumn: ''
+    };
+  }
+  
+  /**
+   * Set execution state and update UI accordingly
+   */
+  function setExecuting(executing) {
+    isExecuting = executing;
+    updateSendButtonState();
+  }
+  
+  // ============================================
+  // FORMULA & DECISION UI - MOVED
+  // ============================================
+  // The following functions have been moved to Sidebar_Agent_Formula.html:
+  // - renderDecisionFeedback(), getDecisionTip(), removeDecisionFeedback()
+  // - showFormulaOption(), applyFormulaDirectly(), applyFormulaDirectFromPlan()
+  // - executeConditionalFormula(), tryConditionalFormula()
+  // - useAIInstead(), useFormulaAlternative()
+  // ============================================
+  
+  /**
+   * Main execution entry point
+   */
+  function executePlan() {
+    if (isExecuting) {
+      console.log('Execution already in progress, ignoring click');
+      return;
+    }
+    
+    if (!currentPlan) return;
+    
+    // Check quota before execution (for free users)
+    checkQuotaBeforeAction(function() {
+      actuallyExecutePlan();
+    });
+  }
+  
+  /**
+   * Actually execute the plan (called after quota check passes)
+   */
+  function actuallyExecutePlan() {
+    if (!currentPlan) return;
+    
+    // Capture format options before execution
+    const formatField = document.getElementById('planFormatHint');
+    if (formatField && formatField.value && formatField.value.trim()) {
+      const formatValue = formatField.value.trim();
+      if (formatValue !== currentPlan.formatHint) {
+        console.log('📋 Capturing format options before execution:', formatValue);
+        updatePlanFormat(formatValue);
+      }
+    }
+    
+    // Validate input selection before execution
+    if (typeof validateInputSelection === 'function') {
+      validateInputSelection().then(function(validationResult) {
+        showValidationResult(validationResult, { blockOnWarning: false }).then(function(shouldProceed) {
+          if (shouldProceed) {
+            checkOverwriteAndContinue();
+          } else {
+            console.log('❌ Execution cancelled due to validation');
+          }
+        });
+      }).catch(function(err) {
+        console.warn('Validation error, proceeding anyway:', err);
+        checkOverwriteAndContinue();
+      });
+    } else {
+      checkOverwriteAndContinue();
+    }
+  }
+  
+  /**
+   * Check for data overwrite before continuing execution
+   */
+  function checkOverwriteAndContinue() {
+    if (typeof checkPlanOverwrite === 'function' && currentPlan) {
+      checkPlanOverwrite(currentPlan).then(function(modifiedPlan) {
+        if (modifiedPlan === null) {
+          console.log('Execution cancelled by user (overwrite protection)');
+          return;
+        }
+        currentPlan = modifiedPlan;
+        continueExecutePlan();
+      }).catch(function(err) {
+        console.warn('Overwrite check error, proceeding:', err);
+        continueExecutePlan();
+      });
+    } else {
+      continueExecutePlan();
+    }
+  }
+  
+  /**
+   * Continue plan execution after validation and overwrite checks pass
+   */
+  function continueExecutePlan() {
+    executionStartTime = Date.now();
+    console.log('⏱️ [TIMING] executePlan started at', new Date().toISOString());
+    
+    setExecuting(true);
+    
+    const selectedModel = document.getElementById('agentModelSelect')?.value || currentPlan.model;
+    currentPlan.model = selectedModel;
+    
+    const planCard = document.querySelector('[data-type="plan"]');
+    if (planCard) {
+      const executeBtn = planCard.querySelector('button[onclick="executePlan()"]');
+      const editBtn = planCard.querySelector('button[onclick="editPlan()"]');
+      
+      if (executeBtn) {
+        executeBtn.disabled = true;
+        executeBtn.innerHTML = '⏳ Starting...';
+        executeBtn.classList.add('opacity-50', 'cursor-not-allowed');
+      }
+      if (editBtn) {
+        editBtn.disabled = true;
+        editBtn.classList.add('opacity-50', 'cursor-not-allowed');
+      }
+    }
+    
+    const planToExecute = { ...currentPlan };
+    currentPlan = null;
+    
+    // Set up pattern learning context
+    collectedResults.taskType = planToExecute.taskType || '';
+    console.log('🔍 Setting taskType for pattern learning:', planToExecute.taskType, '→', collectedResults.taskType);
+    collectedResults.inputRange = planToExecute.inputRange || '';
+    collectedResults.headers = planToExecute.inputColumnHeaders 
+      ? Object.values(planToExecute.inputColumnHeaders) 
+      : [];
+    
+    console.log('⏱️ [TIMING] Calling executeAgentPlan...');
+    
+    if (planToExecute.isMultiColumn && planToExecute.columnPrompts) {
+      console.log('📋 Sending multi-column plan:');
+      const validation = planToExecute.columnValidation || {};
+      Object.entries(planToExecute.columnPrompts).forEach(([col, prompt]) => {
+        const hasDropdown = validation[col]?.type === 'list';
+        const hasHardConstraint = prompt.includes('Output MUST be exactly one of');
+        const headerMatch = prompt.match(/Generate "([^"]+)"/);
+        const header = headerMatch ? headerMatch[1] : col;
+        
+        if (hasDropdown && hasHardConstraint) {
+          const optionsMatch = prompt.match(/Output MUST be exactly one of:\s*([^\n]+)/);
+          const options = optionsMatch ? optionsMatch[1].trim() : '?';
+          console.log(`  ${col}: 🔒 HARD (dropdown) [${options}]`);
+        } else {
+          console.log(`  ${col}: 📝 Free-form (${header})`);
+        }
+      });
+    }
+    
+    // FORMULA-FIRST: Check if tasks can be done with native formulas
+    // Supports both single-column and multi-column plans
+    
+    if (planToExecute.isMultiColumn && planToExecute.columnPrompts) {
+      // MULTI-COLUMN: Evaluate each column independently
+      console.log('🔢 [FormulaFirst] Multi-column plan - evaluating each column...');
+      evaluateMultiColumnFormulaFirst(planToExecute);
+    } else if (planToExecute.outputColumns?.length === 1 &&
+               ['classify', 'categorize', 'extract'].includes(planToExecute.taskType?.toLowerCase())) {
+      // SINGLE-COLUMN: Check formula possibility
+      console.log('🔢 [FormulaFirst] Single-column - checking if formula can solve this task...');
+      
+      // Get current context for better formula generation
+      const ctx = currentSelectionContext || {};
+      const selInfo = ctx.selectionInfo || {};
+      
+      const formulaContext = {
+        command: planToExecute.originalCommand || planToExecute.summary,
+        taskType: planToExecute.taskType,
+        inputColumn: planToExecute.inputColumn,
+        inputColumns: planToExecute.inputColumns || [planToExecute.inputColumn],
+        outputColumn: planToExecute.outputColumns[0],
+        inputRange: planToExecute.inputRange,
+        categories: extractCategoriesFromPrompt(planToExecute.prompt),
+        isMultiColumn: planToExecute.isMultiColumn || false,
+        // Additional context for smarter formula generation
+        allColumns: planToExecute.inputColumns || selInfo.columnsWithData || [],
+        columnHeaders: planToExecute.inputColumnHeaders || ctx.headerRow || {},
+        dataStartRow: selInfo.dataStartRow,
+        dataEndRow: selInfo.dataEndRow
+      };
+      
+    google.script.run
+      .withSuccessHandler(function(evalResult) {
+        console.log('🔢 [FormulaFirst] Evaluation result:', evalResult);
+        
+        if (evalResult && evalResult.canUseFormula && evalResult.formula) {
+          console.log('🔢 [FormulaFirst] Using formula:', evalResult.formula);
+          // Show decision feedback - formula chosen
+          renderDecisionFeedback(evalResult, planToExecute, true);
+          applyFormulaAndShowSuccess(evalResult, planToExecute);
+        } else {
+          console.log('🔢 [FormulaFirst] No formula - proceeding with AI:', evalResult?.explanation);
+          // Show decision feedback - AI chosen
+          renderDecisionFeedback(evalResult, planToExecute, false);
+          executeWithAI(planToExecute);
+        }
+      })
+      .withFailureHandler(function(err) {
+        console.warn('🔢 [FormulaFirst] Check failed, using AI:', err.message);
+        // Show decision feedback for fallback to AI
+        renderDecisionFeedback({ explanation: 'Formula evaluation unavailable - using AI for reliable results.' }, planToExecute, false);
+        executeWithAI(planToExecute);
+      })
+      .checkFormulaFirst(formulaContext);
+    } else {
+      // Skip formula check for unsupported task types
+      const taskType = planToExecute.taskType?.toLowerCase() || '';
+      const taskExplanations = {
+        summarize: 'Summarization requires understanding context and meaning - only AI can do this.',
+        translate: 'Translation requires semantic understanding of language nuances.',
+        generate: 'Content generation creates new, unique text that formulas cannot produce.',
+        rewrite: 'Rewriting text requires understanding tone and style - AI excels at this.',
+        analyze: 'Deep analysis requires contextual understanding beyond formula capabilities.'
+      };
+      
+      renderDecisionFeedback({
+        explanation: taskExplanations[taskType] || 'This task type requires AI semantic processing.'
+      }, planToExecute, false);
+      
+      executeWithAI(planToExecute);
+    }
+  }
+  
+  // ============================================
+  // MULTI-COLUMN FORMULA - MOVED
+  // ============================================
+  // The following functions have been moved to Sidebar_Agent_MultiColumnFormula.html:
+  // - evaluateMultiColumnFormulaFirst(), detectTaskTypeFromPrompt()
+  // - applyMultipleFormulasAndShowSuccess(), executeHybridPlan()
+  // - executeAIColumnsOnly(), showHybridProgressMessage()
+  // - showMultiFormulaSuccess(), extractCategoriesFromPrompt()
+  // - applyFormulaAndShowSuccess(), retryWithAI(), executeWithAI()
+  // ============================================
+  
+  function editPlan() {
+    if (currentPlan && currentPlan.originalCommand) {
+      const input = document.getElementById('agentInput');
+      if (input) {
+        input.value = currentPlan.originalCommand;
+        input.focus();
+      }
+    }
+    
+    const planCard = document.querySelector('[data-type="plan"]');
+    if (planCard) planCard.remove();
+    
+    currentPlan = null;
+    showToast('Edit your command and re-submit', 'info');
+  }
+  
+  /**
+   * Update output column in current plan
+   */
+  function updatePlanOutput(newCol) {
+    if (!currentPlan) return;
+    
+    currentPlan.outputColumns = [newCol];
+    
+    const oldSummary = currentPlan.summary || '';
+    if (oldSummary.includes('column')) {
+      currentPlan.summary = oldSummary.replace(/column[s]?\s+[A-Z](?:,\s*[A-Z])*/i, 'column ' + newCol);
+    }
+    
+    console.log('Plan output updated to:', newCol);
+  }
+  
+  /**
+   * Update input range in current plan
+   * Allows user to specify exactly which data to process
+   */
+  function updatePlanRange(newRange) {
+    if (!currentPlan) return;
+    
+    // Validate range format (e.g., A1:A10, B2:D20)
+    const rangePattern = /^[A-Z]+\d+:[A-Z]+\d+$/i;
+    if (!rangePattern.test(newRange.trim())) {
+      showToast('Invalid range format. Use format like B4:B13', 'error');
+      // Reset to original
+      const rangeInput = document.getElementById('planInputRange');
+      if (rangeInput) rangeInput.value = currentPlan.inputRange;
+      return;
+    }
+    
+    const trimmedRange = newRange.trim().toUpperCase();
+    const oldRange = currentPlan.inputRange;
+    
+    if (trimmedRange === oldRange) return;
+    
+    // Parse new range to get row count
+    const match = trimmedRange.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/i);
+    if (!match) return;
+    
+    const startCol = match[1].toUpperCase();
+    const startRow = parseInt(match[2]);
+    const endCol = match[3].toUpperCase();
+    const endRow = parseInt(match[4]);
+    
+    // Warn if starting at row 1 (likely includes headers)
+    if (startRow === 1) {
+      showToast('⚠️ Range starts at row 1 (headers). Data usually starts at row 2 or 3.', 'warning');
+    }
+    
+    const newRowCount = endRow - startRow + 1;
+    
+    // Update plan
+    currentPlan.inputRange = trimmedRange;
+    currentPlan.rowCount = newRowCount;
+    currentPlan.inputColumn = startCol;
+    
+    // Update summary
+    currentPlan.summary = currentPlan.summary.replace(oldRange, trimmedRange);
+    
+    // Update UI
+    const rowCountEl = document.getElementById('planRowCount');
+    if (rowCountEl) rowCountEl.textContent = newRowCount;
+    
+    // Recalculate cost estimate
+    if (typeof fetchCostEstimate === 'function') {
+      fetchCostEstimate(currentPlan, function(estimate) {
+        currentPlan.estimate = estimate;
+        const costEl = document.getElementById('planCostEstimate');
+        if (costEl && estimate?.cost) {
+          costEl.textContent = estimate.cost.formatted || '<$0.01';
+        }
+      });
+    }
+    
+    console.log('📍 Plan range updated:', oldRange, '→', trimmedRange, '(' + newRowCount + ' rows)');
+    showToast('Range updated: ' + trimmedRange + ' (' + newRowCount + ' rows)', 'info');
+  }
+  
+  /**
+   * Refresh range from current sheet selection
+   * Useful when user selects a different area in the sheet
+   */
+  function refreshRangeFromSelection() {
+    google.script.run
+      .withSuccessHandler(function(context) {
+        if (context?.selectedRange) {
+          const rangeInput = document.getElementById('planInputRange');
+          if (rangeInput) {
+            rangeInput.value = context.selectedRange;
+            updatePlanRange(context.selectedRange);
+          }
+        } else {
+          showToast('No selection detected. Please select a range in the sheet.', 'error');
+        }
+      })
+      .withFailureHandler(function(err) {
+        showToast('Failed to get selection: ' + err.message, 'error');
+      })
+      .getAgentContext();
+  }
+  
+  /**
+   * Update format hint in current plan
+   */
+  function updatePlanFormat(formatHint) {
+    if (!currentPlan) return;
+    
+    currentPlan.formatHint = formatHint;
+    
+    if (!formatHint || !formatHint.trim()) {
+      console.log('Format hint cleared');
+      return;
+    }
+    
+    const trimmedHint = formatHint.trim();
+    
+    const isClassificationOptions = trimmedHint.includes(',') && 
+      trimmedHint.split(',').every(opt => opt.trim().length > 0 && opt.trim().length < 30);
+    
+    let classificationInstruction = null;
+    if (isClassificationOptions) {
+      const options = trimmedHint.split(',').map(o => o.trim()).join(', ');
+      classificationInstruction = `\n\nPreferred output: one of [${options}]. If the content clearly fits one of these categories, use it. If none fit well, provide a brief 1-2 word appropriate label instead.`;
+    }
+    
+    if (currentPlan.isMultiColumn && currentPlan.columnPrompts) {
+      // Check if we have AI-generated per-column classification options
+      const hasPerColumnOptions = currentPlan.columnClassificationOptions && 
+                                   Object.keys(currentPlan.columnClassificationOptions).length > 0;
+      
+      Object.keys(currentPlan.columnPrompts).forEach(col => {
+        let prompt = currentPlan.columnPrompts[col] || '';
+        
+        const headerMatch = prompt.match(/Generate "([^"]+)"/);
+        const header = headerMatch ? headerMatch[1] : '';
+        
+        // Clean up any existing format instructions
+        prompt = prompt.replace(/\n\nFormat the result as:.*$/s, '');
+        prompt = prompt.replace(/\n\nReturn the result in this format:.*$/s, '');
+        prompt = prompt.replace(/\n\nIMPORTANT: Output MUST be exactly one of:.*$/s, '');
+        prompt = prompt.replace(/\n\nPreferred output:.*$/s, '');
+        
+        // PRIORITY 1: Check if column has dropdown validation → HARD constraint
+        const validation = currentPlan.columnValidation || {};
+        const hasDropdown = validation[col]?.type === 'list';
+        
+        if (hasDropdown) {
+          // Column has dropdown → use HARD constraint with actual dropdown values
+          const dropdownValues = validation[col].values.join(', ');
+          const hardConstraint = `\n\nIMPORTANT: Output MUST be exactly one of: ${dropdownValues}\nDo NOT output anything else - just one of those exact values.`;
+          prompt += hardConstraint;
+          console.log(`  ${col}: HARD constraint (dropdown) → [${dropdownValues}]`);
+        } else if (hasPerColumnOptions && currentPlan.columnClassificationOptions[col]) {
+          // No dropdown but AI suggested options → just informational, let AI be smart
+          console.log(`  ${col}: Free-form (AI suggested options but no dropdown)`);
+        } 
+        // PRIORITY 2: Manual options (only if AI didn't provide any)
+        else if (isClassificationOptions && !hasPerColumnOptions) {
+          // Only use manual options if header looks like classification type
+          const isClassificationColumn = isClassificationHeader(header);
+          if (isClassificationColumn && classificationInstruction) {
+            prompt += classificationInstruction;
+            console.log(`  ${col}: Manual options applied (${header})`);
+          } else {
+            console.log(`  ${col}: Skipped manual options (not classification type)`);
+          }
+        }
+        // PRIORITY 3: No options - just use the header as guidance (let AI be smart)
+        else {
+          console.log(`  ${col}: No options - AI will use header "${header}" as guidance`);
+        }
+        
+        currentPlan.columnPrompts[col] = prompt;
+      });
+    } else {
+      // Single column case
+      let prompt = currentPlan.prompt || '';
+      prompt = prompt.replace(/\n\nFormat the result as:.*$/s, '');
+      prompt = prompt.replace(/\n\nReturn the result in this format:.*$/s, '');
+      prompt = prompt.replace(/\n\nIMPORTANT: Output MUST be exactly one of:.*$/s, '');
+      prompt = prompt.replace(/\n\nPreferred output:.*$/s, '');
+      
+      if (isClassificationOptions && classificationInstruction) {
+        prompt += classificationInstruction;
+      } else if (trimmedHint) {
+        prompt += '\n\nFormat the result as: ' + trimmedHint;
+      }
+      currentPlan.prompt = prompt;
+    }
+  }
+  
+  /**
+   * Toggle a column task on/off
+   */
+  function toggleColumnTask(col) {
+    if (!currentPlan || !currentPlan.isMultiColumn) return;
+    
+    const checkbox = document.getElementById('colCheck' + col);
+    const isEnabled = checkbox?.checked;
+    
+    if (isEnabled) {
+      if (!currentPlan.outputColumns.includes(col)) {
+        currentPlan.outputColumns.push(col);
+        currentPlan.outputColumns.sort();
+      }
+    } else {
+      currentPlan.outputColumns = currentPlan.outputColumns.filter(c => c !== col);
+    }
+    
+    if (currentPlan.outputColumns.length === 0) {
+      showToast('At least one column must be selected', 'error');
+      checkbox.checked = true;
+      currentPlan.outputColumns.push(col);
+      return;
+    }
+    
+    console.log('Plan columns updated:', currentPlan.outputColumns);
+  }
+  
+  // ============================================
+  // JOB MONITORING - MOVED
+  // ============================================
+  // The following functions have been moved to Sidebar_Agent_JobMonitor.html:
+  // - showMultiColumnProgress()
+  // - startJobPolling(), startSSEMonitoring()
+  // - handleJobUpdate(), onAllJobsComplete()
+  // - startPollingFallback(), startPollingFallbackForJobs(), pollJobLegacy()
+  // - updateColumnProgress(), updateColumnStatus()
+  // ============================================
+  
+  function showCompletionSummary(plan, startTime) {
+    // Clean up decision feedback on completion
+    removeDecisionFeedback();
+    
+    const totalTime = formatTime(Date.now() - startTime);
+    const totalFromClick = executionStartTime ? ((Date.now() - executionStartTime) / 1000).toFixed(1) : '?';
+    const durationMs = executionStartTime ? (Date.now() - executionStartTime) : 0;
+    console.log('⏱️ [TIMING] Total time from click: ' + totalFromClick + 's, from SSE start: ' + totalTime);
+    
+    // Log execution completion event
+    if (typeof logExecutionEvent === 'function') {
+      logExecutionEvent(plan.outputColumns, 'success', durationMs);
+    }
+    
+    const summary = `
+      <p class="font-semibold mb-2">Done! ${plan.rowCount} rows processed.</p>
+      <div class="text-xs text-green-700 flex flex-wrap items-center gap-2">
+        <span class="bg-green-100 px-2 py-1 rounded">${plan.taskType}</span>
+        <span class="font-mono">${plan.inputRange} → ${plan.outputColumns.join(', ')}</span>
+        <span class="text-green-600">• ${totalTime}</span>
+      </div>
+    `;
+    
+    addAgentMessage('complete', summary);
+    
+    // Show cost/token usage if available
+    if (typeof showTaskCostSummary === 'function') {
+      showTaskCostSummary({
+        model: plan.model || 'GEMINI',
+        rowCount: plan.rowCount,
+        // Token counts come from collectedResults if tracked
+        inputTokens: collectedResults.inputTokens || plan.rowCount * 150,
+        outputTokens: collectedResults.outputTokens || plan.rowCount * 100
+      });
+    }
+    
+    // Show contextual "What's next?" suggestions based on completed task
+    showNextActionSuggestions(plan);
+    
+    currentPlan = null;
+    
+    // Refresh usage indicator after job completion
+    if (typeof refreshUsageAfterAction === 'function') {
+      refreshUsageAfterAction();
+    }
+    
+    // Pattern Learning: Analyze results for formula opportunities
+    triggerPatternAnalysis(plan);
+  }
+  
+  /**
+   * State for tracking suggestion workflow IDs (single task)
+   */
+  let lastTaskSuggestionWorkflowId = null;
+  
+  /**
+   * Show contextual "What's next?" suggestions after task completion
+   * Now uses backend API for dynamic, learning-based suggestions
+   */
+  async function showNextActionSuggestions(completedPlan) {
+    const taskType = (completedPlan.taskType || '').toLowerCase();
+    const outputCol = completedPlan.outputColumns?.[0] || 'E';
+    const inputCols = completedPlan.inputColumns || [completedPlan.inputColumn || 'A'];
+    const nextCol = String.fromCharCode(outputCol.charCodeAt(0) + 1);
+    
+    // Try to get suggestions from API
+    let suggestions;
+    let source = 'fallback';
+    
+    try {
+      console.log('💡 [Suggestions] Fetching from API for single task...');
+      const result = await fetchTaskSuggestions(completedPlan);
+      suggestions = result?.suggestions || [];
+      source = result?.source || 'api';
+      
+      if (result?.workflowId) {
+        lastTaskSuggestionWorkflowId = result.workflowId;
+      }
+      console.log('💡 [Suggestions] Got', suggestions.length, 'suggestions from', source);
+    } catch (error) {
+      console.warn('💡 [Suggestions] API failed, using fallback:', error);
+      suggestions = getGenericTaskSuggestions(taskType, outputCol, inputCols, nextCol);
+    }
+    
+    if (!suggestions || suggestions.length === 0) {
+      suggestions = getGenericTaskSuggestions(taskType, outputCol, inputCols, nextCol);
+      source = 'fallback';
+    }
+    
+    renderTaskSuggestions(suggestions, source);
+  }
+  
+  /**
+   * Fetch suggestions from backend API for single task
+   */
+  function fetchTaskSuggestions(plan) {
+    // Get user's selected model from UI
+    const selectedModel = document.getElementById('agentModelSelect')?.value || 'GEMINI';
+    
+    // Build rich context for the LLM
+    const inputColumns = plan.inputColumns || currentSelectionContext?.columnsWithData || [];
+    const outputColumns = plan.outputColumns || [];
+    const allColumns = [...new Set([...inputColumns, ...outputColumns])];
+    
+    // Build sample data from selection context if available
+    const sampleData = {};
+    if (currentSelectionContext?.sampleData) {
+      Object.entries(currentSelectionContext.sampleData).forEach(([col, values]) => {
+        if (Array.isArray(values)) {
+          sampleData[col] = values.slice(0, 3); // First 3 samples
+        }
+      });
+    }
+    
+    // Build headers map
+    const headers = {};
+    if (currentSelectionContext?.headers && Array.isArray(currentSelectionContext.headers)) {
+      currentSelectionContext.headers.forEach(h => {
+        if (h.column && h.name) headers[h.column] = h.name;
+      });
+    }
+    
+    const requestBody = {
+      taskType: plan.taskType,
+      taskDescription: plan.originalCommand || plan.summary || plan.description,
+      dataContext: {
+        columns: allColumns,
+        inputColumns: inputColumns,
+        outputColumns: outputColumns,
+        headers: headers,
+        rowCount: plan.rowCount || 0,
+        sampleData: sampleData
+      },
+      command: plan.originalCommand,
+      provider: selectedModel  // Pass user's selected model
+    };
+    
+    console.log('[Suggestions] Sending context:', JSON.stringify(requestBody).substring(0, 500));
+    
+    return new Promise((resolve, reject) => {
+      google.script.run
+        .withSuccessHandler(result => {
+          if (result && result.suggestions) {
+            resolve(result);
+          } else {
+            reject(new Error('Invalid suggestions response'));
+          }
+        })
+        .withFailureHandler(err => {
+          console.error('[Suggestions] API call failed:', err);
+          reject(err);
+        })
+        .callSuggestionsAPI(requestBody);
+    });
+  }
+  
+  /**
+   * Render task suggestions UI
+   * Uses data attributes + global array to avoid inline JS escaping issues
+   */
+  function renderTaskSuggestions(suggestions, source) {
+    // Store suggestions so onclick can reference by index (avoids escaping issues)
+    window._taskSuggestionItems = suggestions.slice(0, 3);
+    
+    const suggestionsHtml = window._taskSuggestionItems.map((s, idx) => `
+      <div class="flex items-center gap-2 py-1.5 px-2 cursor-pointer hover:bg-blue-50 rounded transition-colors"
+           onclick="handleTaskSuggestionClick(${idx})">
+        <span class="text-sm">${s.icon}</span>
+        <span class="text-[11px] text-gray-700 flex-1">${escapeHtml(s.title)}</span>
+        <span class="text-[11px] text-blue-500">Run →</span>
+      </div>
+    `).join('');
+    
+    const sourceIndicator = source === 'memory' ? 
+      '<span class="text-[8px] text-blue-400 ml-1">(learned)</span>' : '';
+    
+    const cardHtml = `
+      <div class="card p-2 mt-2 bg-gradient-to-br from-blue-50 to-indigo-50 border-blue-200" data-type="next-actions">
+        <div class="flex items-center gap-2 mb-1.5 px-1">
+          <span class="text-sm">💡</span>
+          <span class="text-[11px] font-semibold text-blue-900">What's next?</span>
+          ${sourceIndicator}
+        </div>
+        <div class="bg-white rounded-lg border border-blue-100 divide-y divide-blue-50">
+          ${suggestionsHtml}
+        </div>
+      </div>
+    `;
+    
+    const messagesDiv = document.getElementById('agentMessages');
+    messagesDiv.insertAdjacentHTML('beforeend', cardHtml);
+    autoScrollMessages();
+  }
+  
+  /**
+   * Generic fallback suggestions for single tasks (minimal hardcoding)
+   */
+  function getGenericTaskSuggestions(taskType, outputCol, inputCols, nextCol) {
+    const firstInput = inputCols[0] || 'A';
+    
+    // Task-type aware fallbacks (minimal, covers common patterns)
+    const suggestions = [];
+    
+    if (taskType === 'classify' || taskType === 'categorize') {
+      suggestions.push({
+        icon: '📊',
+        title: 'Summarize by category',
+        command: `Summarize column ${firstInput} grouped by ${outputCol} categories to ${nextCol}`
+      });
+    } else if (taskType === 'summarize') {
+      suggestions.push({
+        icon: '🏷️',
+        title: 'Classify by topic',
+        command: `Classify the topics of column ${outputCol} to column ${nextCol}`
+      });
+    }
+    
+    // Always add generic suggestions
+    suggestions.push({
+      icon: '🏷️',
+      title: 'Classify results',
+      command: `Classify column ${outputCol} to column ${nextCol}`
+    });
+    suggestions.push({
+      icon: '📝',
+      title: 'Summarize results',
+      command: `Summarize column ${outputCol} to column ${nextCol}`
+    });
+    
+    return suggestions.slice(0, 3);
+  }
+  
+  /**
+   * Handle task suggestion click (safe from inline JS escaping issues)
+   */
+  function handleTaskSuggestionClick(idx) {
+    var item = window._taskSuggestionItems && window._taskSuggestionItems[idx];
+    if (item) {
+      executeNextAction(item.command, item.title);
+    }
+  }
+
+  /**
+   * Execute a next action suggestion
+   * @param {string} command - The command to execute
+   * @param {string} suggestionTitle - Title of the suggestion (for learning)
+   */
+  function executeNextAction(command, suggestionTitle) {
+    // Remove the next actions card
+    const nextActionsCard = document.querySelector('[data-type="next-actions"]');
+    if (nextActionsCard) nextActionsCard.remove();
+    
+    // Record suggestion usage for learning (if we have a workflow ID)
+    if (lastTaskSuggestionWorkflowId && suggestionTitle) {
+      recordTaskSuggestionUsage(lastTaskSuggestionWorkflowId, {
+        title: suggestionTitle,
+        command: command
+      });
+    }
+    
+    // Put command in input and trigger parsing
+    const input = document.getElementById('agentInput');
+    if (input) {
+      input.value = command;
+      input.dispatchEvent(new Event('input'));
+    }
+    
+    // Auto-send after brief delay
+    setTimeout(function() {
+      if (typeof sendAgentMessage === 'function') {
+        sendAgentMessage();
+      }
+    }, 300);
+  }
+  
+  /**
+   * Record task suggestion usage for learning loop
+   */
+  function recordTaskSuggestionUsage(workflowId, suggestion) {
+    console.log('📝 [Learning] Recording task suggestion usage:', suggestion.title);
+    
+    google.script.run
+      .withSuccessHandler(() => {
+        console.log('📝 [Learning] Task suggestion recorded successfully');
+      })
+      .withFailureHandler(err => {
+        console.warn('📝 [Learning] Failed to record task suggestion:', err);
+      })
+      .recordSuggestionSuccess({
+        workflowId: workflowId,
+        suggestion: suggestion,
+        success: true
+      });
+  }
+  
+  /**
+   * Trigger pattern analysis after job completion
+   * This teaches users when formulas could replace AI
+   */
+  function triggerPatternAnalysis(plan) {
+    // Only for classification-type tasks
+    const classifyTasks = ['classify', 'categorize', 'score', 'rate', 'evaluate'];
+    // Use plan.taskType as primary source (collectedResults may be cleared)
+    const taskType = plan?.taskType || collectedResults.taskType || '';
+    const taskTypeLower = taskType.toLowerCase();
+    console.log('🔍 Pattern analysis check - taskType:', taskType, '→ lowercase:', taskTypeLower);
+    if (!classifyTasks.includes(taskTypeLower)) {
+      console.log('🔍 Pattern analysis skipped - taskType "' + taskTypeLower + '" not in', classifyTasks);
+      return;
+    }
+    
+    // Need enough results to analyze
+    if (!collectedResults.outputs || collectedResults.outputs.length < 5) {
+      console.log('🔍 Pattern analysis skipped - not enough data');
+      return;
+    }
+    
+    // Need valid input range
+    if (!collectedResults.inputRange || collectedResults.inputRange.trim() === '') {
+      console.log('🔍 Pattern analysis skipped - no valid input range');
+      return;
+    }
+    
+    console.log('🔍 Triggering pattern analysis for', collectedResults.outputs.length, 'results...');
+    
+    // Get input data from the sheet for pattern analysis
+    google.script.run
+      .withSuccessHandler(function(inputData) {
+        if (inputData && inputData.length > 0) {
+          // Convert array to objects with column keys
+          const headers = collectedResults.headers;
+          const inputObjects = inputData.map(row => {
+            const obj = {};
+            if (Array.isArray(row)) {
+              row.forEach((val, i) => {
+                obj[headers[i] || 'col' + i] = val;
+              });
+            } else {
+              obj.value = row;
+            }
+            return obj;
+          });
+          
+          // Call pattern analyzer
+          if (typeof analyzeCompletedJobForPattern === 'function') {
+            analyzeCompletedJobForPattern({
+              inputs: inputObjects,
+              outputs: collectedResults.outputs,
+              headers: headers,
+              inputRange: collectedResults.inputRange,
+              outputColumn: collectedResults.outputColumn,
+              taskType: collectedResults.taskType
+            });
+          }
+        }
+      })
+      .withFailureHandler(function(err) {
+        console.log('🔍 Pattern analysis skipped - could not fetch input data:', err);
+      })
+      .getRangeValuesMultiColumn(collectedResults.inputRange);
+  }
+  
+  function formatTime(ms) {
+    const seconds = Math.floor(ms / 1000);
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  
+  console.log('📦 Agent Execution module loaded');
+  </script>
+  

@@ -1,0 +1,565 @@
+<!--
+  @file Sidebar_Agent_JobMonitor.html
+  @version 1.0.0
+  @updated 2026-01-21
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 1.0.0 (2026-01-21): Extracted from Sidebar_Agent_Execution.html
+    - Progress tracking UI
+    - SSE monitoring
+    - Polling fallback
+    - Job update handling
+  
+  ============================================
+  SIDEBAR_AGENT_JOBMONITOR - Job Monitoring Module
+  ============================================
+  
+  Handles job progress monitoring:
+  - Multi-column progress UI
+  - SSE real-time updates
+  - Polling fallback
+  - Completion handling
+  
+  Included by: Sidebar.html (after Sidebar_Agent_MultiColumnFormula)
+  Dependencies: writtenColumns, writeQueue, isWriting, queueWrite, waitForWriteQueue
+-->
+
+<script>
+// ============================================
+// PROGRESS TRACKING UI
+// ============================================
+
+/**
+ * Show multi-column progress UI
+ */
+function showMultiColumnProgress(plan, result) {
+  const activeCols = result.jobs.filter(j => j.status !== 'failed').length;
+  
+  let progressHtml = `
+    <div class="progress-header">
+      <div class="flex items-center gap-2">
+        <span class="progress-icon">⚡</span>
+        <div class="flex-1">
+          <p class="text-[11px] font-semibold text-gray-700">${result.totalRows} rows</p>
+          <p class="text-[11px] text-gray-500">${activeCols} col${activeCols > 1 ? 's' : ''}</p>
+        </div>
+        <span class="live-indicator">● LIVE</span>
+      </div>
+    </div>
+  `;
+  
+  result.jobs.forEach((job) => {
+    const isFailed = job.status === 'failed';
+    const statusClass = isFailed ? 'col-progress-failed' : 'col-progress-active';
+    progressHtml += `
+      <div class="col-progress-row ${statusClass}" id="colProgress${job.column}">
+        <div class="flex justify-between items-center text-[11px]">
+          <span class="font-semibold text-gray-600">${job.column}</span>
+          <span id="colStatus${job.column}" class="${isFailed ? 'status-failed' : 'status-pending'}">${isFailed ? '✗' : '...'}</span>
+        </div>
+        ${!isFailed ? `<div class="progress"><div id="colBar${job.column}" class="progress-bar-animated" style="width: 0%"></div></div>` : ''}
+      </div>
+    `;
+  });
+  
+  addAgentMessage('progress', progressHtml);
+}
+
+// ============================================
+// JOB MONITORING (SSE + Polling)
+// ============================================
+
+/**
+ * Start job monitoring with SSE and polling fallback
+ */
+function startJobPolling(jobs, plan) {
+  const validJobs = jobs.filter(j => j.status !== 'failed');
+  if (validJobs.length === 0) {
+    addAgentMessage('error', 'All jobs failed to start');
+    setExecuting(false);
+    return;
+  }
+  
+  writtenColumns.clear();
+  writeQueue.length = 0;
+  
+  const rangeMatch = plan.inputRange.match(/[A-Z]+(\d+)/i);
+  const startRow = rangeMatch ? parseInt(rangeMatch[1], 10) : 2;
+  
+  const startTime = Date.now();
+  const jobIds = validJobs.map(j => j.jobId);
+  const jobColumnMap = {};
+  validJobs.forEach(j => { jobColumnMap[j.jobId] = j.column; });
+  
+  // Debug: Log job-to-column mapping
+  console.log('🗺️ Job-to-column mapping:');
+  validJobs.forEach(j => {
+    const promptPreview = plan.columnPrompts?.[j.column]?.substring(0, 60) || plan.prompt?.substring(0, 60) || 'no prompt';
+    console.log('  ' + j.jobId.substring(0, 8) + '... → col ' + j.column + ' ("' + promptPreview + '...")');
+  });
+  
+  const completedJobs = new Set();
+  
+  google.script.run
+    .withSuccessHandler(function(streamConfig) {
+      if (streamConfig && streamConfig.supportsSSE && typeof EventSource !== 'undefined') {
+        startSSEMonitoring(streamConfig.url, jobColumnMap, plan, startRow, startTime, completedJobs);
+      } else {
+        console.log('SSE not supported, using polling');
+        startPollingFallback(validJobs, plan, startRow, startTime);
+      }
+    })
+    .withFailureHandler(function(err) {
+      console.error('Failed to get stream URL:', err);
+      startPollingFallback(validJobs, plan, startRow, startTime);
+    })
+    .getJobStreamUrl(jobIds);
+}
+
+/**
+ * Monitor job completion using SSE + polling fallback
+ * 
+ * Architecture:
+ * - SSE: Real-time updates (optimistic, fast when it works)
+ * - Polling: Reliable backup every 5s (SSE is unreliable in GAS sidebar)
+ * - First mechanism to detect completion wins
+ * 
+ * When fetching missing results:
+ * - Progressive retry delays: 3s → 5s → 8s → 12s → 15s
+ * - Faster initial checks, slower as retries continue
+ */
+function startSSEMonitoring(url, jobColumnMap, plan, startRow, startTime, completedJobs) {
+  cleanupActiveResources();
+  
+  const jobIds = Object.keys(jobColumnMap);
+  const expectedColumns = Object.values(jobColumnMap);
+  let completionTriggered = false;
+  let pollCount = 0;
+  
+  // Polling config - single interval approach (simpler, no overlap)
+  const POLL_INTERVAL_MS = 5000; // Poll every 5s
+  const MAX_POLLS = 24;          // Safety limit (~2 min)
+  
+  // Check if all work is done
+  function isComplete() {
+    return expectedColumns.every(col => writtenColumns.has(col)) 
+           && writeQueue.length === 0 
+           && !isWriting;
+  }
+  
+  // Poll server for job status
+  function pollJobStatus() {
+    if (completionTriggered) return;
+    
+    // Check if SSE already handled everything
+    if (isComplete()) {
+      console.log('✓ Complete (via SSE)');
+      finish();
+      return;
+    }
+    
+    pollCount++;
+    if (pollCount > MAX_POLLS) {
+      console.warn('⚠️ Max polls reached, forcing completion');
+      finish();
+      return;
+    }
+    
+    // Find jobs that haven't written results yet
+    const pendingJobs = jobIds.filter(id => !writtenColumns.has(jobColumnMap[id]));
+    if (pendingJobs.length === 0) return;
+    
+    console.log('📡 Poll #' + pollCount + ' checking ' + pendingJobs.length + ' job(s)...');
+    
+    // Check first pending job
+    google.script.run
+      .withSuccessHandler(function(status) {
+        if (completionTriggered) return;
+        if (status && (status.status === 'completed' || status.progress >= 100)) {
+          console.log('📡 Poll detected completion');
+          finish();
+        }
+      })
+      .withFailureHandler(function(err) {
+        console.warn('Poll error:', err);
+      })
+      .getJobStatus(pendingJobs[0]);
+  }
+  
+  // Cleanup and fetch final results
+  function finish() {
+    if (completionTriggered) return;
+    completionTriggered = true;
+    
+    if (activePollingTimer) {
+      clearInterval(activePollingTimer);
+      activePollingTimer = null;
+    }
+    
+    if (activeEventSource) {
+      activeEventSource.close();
+      activeEventSource = null;
+    }
+    
+    fetchMissingResults(jobColumnMap, startRow, function() {
+      onAllJobsComplete(plan, startTime);
+    });
+  }
+  
+  // Start SSE connection
+  function connect() {
+    const elapsed = executionStartTime ? ((Date.now() - executionStartTime) / 1000).toFixed(1) : '?';
+    console.log('⏱️ [TIMING] Opening SSE after ' + elapsed + 's');
+    console.log('Opening SSE for jobs:', jobIds.join(', '));
+    
+    activeEventSource = new EventSource(url);
+    
+    // Start polling every 5s (first poll at 5s, gives SSE time to deliver first)
+    activePollingTimer = setInterval(pollJobStatus, POLL_INTERVAL_MS);
+    
+    activeEventSource.onmessage = function(event) {
+      try {
+        const msg = JSON.parse(event.data);
+        const elapsed = formatTime(Date.now() - startTime);
+        
+        switch (msg.type) {
+          case 'initial':
+          case 'update':
+            handleJobUpdate(msg.data, jobColumnMap, plan, startRow, elapsed, completedJobs);
+            break;
+          case 'complete':
+            console.log('✓ Complete (via SSE)');
+            finish();
+            break;
+          case 'error':
+            console.warn('SSE error:', msg.message);
+            break;
+        }
+      } catch (e) {
+        console.error('SSE parse error:', e);
+      }
+    };
+    
+    activeEventSource.onerror = function() {
+      console.warn('SSE connection lost (polling active)');
+      if (activeEventSource) {
+        activeEventSource.close();
+        activeEventSource = null;
+      }
+    };
+  }
+  
+  connect();
+}
+
+// ============================================
+// JOB UPDATE HANDLER
+// ============================================
+
+/**
+ * Handle job update from SSE or polling
+ */
+function handleJobUpdate(job, jobColumnMap, plan, startRow, elapsed, completedJobs) {
+  const col = jobColumnMap[job.id];
+  if (!col) return;
+  
+  const percent = job.progress || 0;
+  const processed = job.processedRows || 0;
+  const totalRows = job.totalRows || plan.rowCount;
+  const hasResults = job.results && job.results.length > 0;
+  
+  console.log('Job update: ' + job.id.substring(0,8) + ' → col ' + col + ', status=' + job.status + ', progress=' + percent + '%, hasResults=' + hasResults);
+  
+  updateColumnProgress(col, percent, processed, totalRows, elapsed);
+  
+  if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+    completedJobs.add(job.id);
+  }
+  
+  const resultsReady = percent >= 100 && hasResults;
+  const isTerminal = job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled';
+  
+  if (resultsReady || isTerminal) {
+    // CRITICAL: Handle multi-aspect results (split and write to multiple columns)
+    if (job.isMultiAspect && job.columns && job.columns.length > 1) {
+      console.log('[Multi-Aspect] Job completed for columns: ' + job.columns.join(', '));
+      
+      if (hasResults) {
+        // Split each result by '|' and write to corresponding columns
+        const splitResults = splitMultiAspectResults(job.results, job.columns.length, job.outputFormat);
+        
+        // Write each aspect to its column
+        job.columns.forEach(function(column, colIdx) {
+          if (writtenColumns.has(column)) {
+            console.log('[Multi-Aspect] Column ' + column + ' already written, skipping');
+            return;
+          }
+          
+          const columnResults = splitResults[colIdx];
+          writtenColumns.add(column);
+          
+          console.log('[Multi-Aspect] Writing ' + columnResults.length + ' results to column ' + column);
+          proceedWithWrite(columnResults, column, startRow, completedJobs, job.id + '-' + column);
+        });
+      }
+      return;
+    }
+    
+    // Standard single-column handling
+    if (writtenColumns.has(col)) {
+      console.log('Column ' + col + ' already written, skipping duplicate');
+      updateColumnStatus(col, '✓', 'text-green-600');
+      if (isTerminal) completedJobs.add(job.id);
+      return;
+    }
+    
+    if (hasResults) {
+      // Mark as "queued" to prevent duplicate queuing (but not "written" yet)
+      writtenColumns.add(col);
+      
+      // Check for empty results - this can happen when AI fails to generate content
+      const emptyResults = job.results.filter(function(r) {
+        return !r.output || String(r.output).trim() === '';
+      });
+      
+      // Log detailed results including actual values for debugging
+      console.log('📝 Results for column ' + col + ' (first 3 values):');
+      job.results.slice(0, 3).forEach(function(r, i) {
+        const preview = (r.output || '').toString().substring(0, 50);
+        const isEmpty = !r.output || String(r.output).trim() === '';
+        console.log('  [' + r.index + '] ' + (isEmpty ? '⚠️ EMPTY' : '"' + preview + (preview.length < (r.output || '').toString().length ? '...' : '') + '"'));
+      });
+      
+      // If there are empty results, ask user what to do
+      if (emptyResults.length > 0) {
+        console.warn('⚠️ Column ' + col + ' has ' + emptyResults.length + ' empty result(s) at indices:', 
+          emptyResults.map(function(r) { return r.index; }).join(', '));
+        
+        // Show warning modal and let user decide
+        handleEmptyResultsDecision(job.results, emptyResults, col, startRow, completedJobs, job.id);
+        return;
+      }
+      
+      // No empty results - proceed with normal write
+      console.log('Queueing ' + job.results.length + ' results for column ' + col + ' (progress=' + percent + '%, status=' + job.status + ')');
+      proceedWithWrite(job.results, col, startRow, completedJobs, job.id);
+    } else if (isTerminal) {
+      console.log('Fetching results for terminal job ' + job.id);
+      fetchJobResults(job.id, col, startRow);
+    }
+    return;
+  }
+}
+
+/**
+ * Split multi-aspect results into separate column arrays
+ * @param {Array} results - Job results with combined output (e.g., "Positive | Negative | Neutral | Positive")
+ * @param {number} aspectCount - Number of aspects (columns)
+ * @param {string} outputFormat - Format string with aspect names (e.g., "Performance | UX | Pricing | Features")
+ * @return {Array<Array>} Array of result arrays, one per column
+ */
+function splitMultiAspectResults(results, aspectCount, outputFormat) {
+  console.log('[splitMultiAspect] Splitting ' + results.length + ' results into ' + aspectCount + ' aspects');
+  
+  // Initialize arrays for each aspect/column
+  const columnResults = [];
+  for (let i = 0; i < aspectCount; i++) {
+    columnResults.push([]);
+  }
+  
+  // Split each result
+  results.forEach(function(result) {
+    const output = String(result.output || '').trim();
+    const parts = output.split('|').map(function(p) { return p.trim(); });
+    
+    // Distribute parts to columns
+    for (let colIdx = 0; colIdx < aspectCount; colIdx++) {
+      const value = parts[colIdx] || '';  // Use empty string if aspect missing
+      columnResults[colIdx].push({
+        index: result.index,
+        output: value,
+        input: result.input
+      });
+    }
+    
+    // Debug log for first few results
+    if (result.index < 3) {
+      console.log('[splitMultiAspect] Row ' + result.index + ': "' + output + '" → [' + parts.join(', ') + ']');
+    }
+  });
+  
+  console.log('[splitMultiAspect] Split complete. Results per column: ' + columnResults.map(function(arr) { return arr.length; }).join(', '));
+  return columnResults;
+}
+
+// ============================================
+// COMPLETION HANDLING
+// ============================================
+
+/**
+ * Handle completion of all jobs
+ */
+function onAllJobsComplete(plan, startTime) {
+  waitForWriteQueue(function() {
+    const planCard = document.querySelector('[data-type="plan"]');
+    if (planCard) {
+      const executeBtn = planCard.querySelector('button[onclick="executePlan()"]');
+      if (executeBtn) {
+        executeBtn.innerHTML = '✓ Completed';
+        executeBtn.classList.remove('opacity-50');
+        executeBtn.classList.add('bg-green-500', 'text-white');
+      }
+    }
+    
+    showCompletionSummary(plan, startTime);
+    setExecuting(false);
+    autoScrollMessages();
+    
+    // Send completion notification
+    if (typeof notifyTaskComplete === 'function') {
+      const duration = startTime ? Date.now() - startTime : null;
+      notifyTaskComplete({
+        title: (plan.taskType || 'Task') + ' Complete',
+        rowCount: plan.rowCount,
+        duration: duration,
+        type: 'success'
+      });
+    }
+    
+    google.script.run
+      .withSuccessHandler(function(prefs) {
+        agentPrefs = prefs;
+        renderTaskHistory();
+      })
+      .getAgentPreferences();
+  });
+}
+
+// ============================================
+// POLLING FALLBACK
+// ============================================
+
+/**
+ * Start polling fallback when SSE unavailable
+ */
+function startPollingFallback(validJobs, plan, startRow, startTime) {
+  const jobColumnMap = {};
+  validJobs.forEach(j => { jobColumnMap[j.jobId] = j.column; });
+  const completedJobs = new Set();
+  
+  startPollingFallbackForJobs(validJobs.map(j => j.jobId), jobColumnMap, plan, startRow, startTime, completedJobs);
+}
+
+/**
+ * Poll jobs using legacy method
+ */
+function startPollingFallbackForJobs(jobIds, jobColumnMap, plan, startRow, startTime, completedJobs) {
+  let completedCount = completedJobs.size;
+  const totalJobs = Object.keys(jobColumnMap).length;
+  
+  jobIds.forEach(function(jobId) {
+    if (completedJobs.has(jobId)) return;
+    
+    const col = jobColumnMap[jobId];
+    pollJobLegacy(jobId, col, plan.rowCount, startRow, startTime, function() {
+      completedJobs.add(jobId);
+      completedCount++;
+      if (completedCount >= totalJobs) {
+        onAllJobsComplete(plan, startTime);
+      }
+    });
+  });
+}
+
+/**
+ * Legacy polling for a single job
+ */
+function pollJobLegacy(jobId, col, totalRows, startRow, startTime, onComplete) {
+  const poll = setInterval(function() {
+    google.script.run
+      .withSuccessHandler(function(job) {
+        if (!job) {
+          clearInterval(poll);
+          updateColumnStatus(col, '✗ Job not found', 'text-red-600');
+          onComplete();
+          return;
+        }
+        
+        const percent = job.progress || 0;
+        const processed = job.processedRows || 0;
+        const elapsed = formatTime(Date.now() - startTime);
+        
+        updateColumnProgress(col, percent, processed, totalRows, elapsed);
+        
+        if (job.status === 'completed') {
+          clearInterval(poll);
+          
+          if (job.results && job.results.length > 0) {
+            console.log('Queueing ' + job.results.length + ' results for column ' + col);
+            queueWrite(
+              job.results, 
+              col, 
+              startRow,
+              function() {
+                updateColumnStatus(col, '✓', 'text-green-600');
+                const bar = document.getElementById('colBar' + col);
+                if (bar) bar.classList.add('progress-bar-success');
+              },
+              function(err) {
+                updateColumnStatus(col, '⚠ Write failed', 'text-yellow-600');
+              }
+            );
+          } else {
+            updateColumnStatus(col, '✓', 'text-green-600');
+            const bar = document.getElementById('colBar' + col);
+            if (bar) bar.classList.add('progress-bar-success');
+          }
+          onComplete();
+        } else if (job.status === 'failed' || job.status === 'cancelled') {
+          clearInterval(poll);
+          updateColumnStatus(col, '✗', 'text-red-600');
+          onComplete();
+        }
+      })
+      .withFailureHandler(function(err) {
+        clearInterval(poll);
+        updateColumnStatus(col, '✗', 'text-red-600');
+        onComplete();
+      })
+      .getJobStatus(jobId);
+  }, 2000);
+}
+
+// ============================================
+// UI HELPERS
+// ============================================
+
+/**
+ * Update column progress bar
+ */
+function updateColumnProgress(col, percent, processed, total, time) {
+  const bar = document.getElementById('colBar' + col);
+  const status = document.getElementById('colStatus' + col);
+  
+  if (bar) bar.style.width = percent + '%';
+  if (status) status.textContent = `${processed}/${total}`;
+}
+
+/**
+ * Update column status text
+ */
+function updateColumnStatus(col, status, className) {
+  const statusEl = document.getElementById('colStatus' + col);
+  if (statusEl) {
+    statusEl.textContent = status;
+    statusEl.className = 'text-[11px] ' + className;
+  }
+}
+
+// ============================================
+// MODULE LOADED
+// ============================================
+
+console.log('📦 Agent JobMonitor module loaded');
+</script>

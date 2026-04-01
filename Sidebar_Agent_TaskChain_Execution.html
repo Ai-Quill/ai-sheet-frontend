@@ -1,0 +1,479 @@
+<!--
+  @file Sidebar_Agent_TaskChain_Execution.html
+  @version 1.0.0
+  @created 2026-02-05
+  
+  TASK CHAIN - Execution Module
+  
+  Contains:
+  - Chain execution logic
+  - Polling for progress
+  - Completion handling
+  
+  Depends on: Sidebar_Agent_TaskChain_State.html, Sidebar_Agent_TaskChain_UI.html
+-->
+
+<script>
+// ============================================
+// CHAIN EXECUTION
+// ============================================
+
+/**
+ * Execute the confirmed chain
+ */
+function executeChain() {
+  console.log('🔗 [ExecuteChain] Button clicked');
+  console.log('🔗 [ExecuteChain] currentChain:', currentChain);
+  console.log('🔗 [ExecuteChain] chainExecuting:', chainExecuting);
+  
+  if (!currentChain || chainExecuting) {
+    console.log('🔗 [ExecuteChain] Blocked: no chain or already executing');
+    return;
+  }
+  
+  chainExecuting = true;
+  
+  // Disable buttons
+  const runBtn = document.getElementById('runChainBtn');
+  const cancelBtn = document.getElementById('cancelChainBtn');
+  if (runBtn) {
+    runBtn.disabled = true;
+    runBtn.classList.add('opacity-50', 'cursor-not-allowed');
+    console.log('🔗 [ExecuteChain] Run button disabled');
+  }
+  if (cancelBtn) {
+    cancelBtn.disabled = true;
+    cancelBtn.classList.add('opacity-50', 'cursor-not-allowed');
+    console.log('🔗 [ExecuteChain] Cancel button disabled');
+  }
+  
+  // Debug: Log what we're about to execute
+  console.log('🔗 [ExecuteChain] ⚠️ INPUT CONFIG DEBUG:');
+  console.log('  - inputRange:', currentChain.inputRange);
+  console.log('  - inputColumn:', currentChain.inputColumn);
+  console.log('  - inputColumns:', currentChain.inputColumns);
+  console.log('  - hasMultipleInputColumns:', currentChain.hasMultipleInputColumns);
+  console.log('  - rowCount:', currentChain.rowCount);
+  
+  // Also check context
+  const context = window.currentContext;
+  if (context?.selectionInfo) {
+    console.log('🔗 [ExecuteChain] Context selectionInfo: present');
+    console.log('  - selectionInfo.dataRange:', context.selectionInfo.dataRange);
+    console.log('  - selectionInfo.columnsWithData:', context.selectionInfo.columnsWithData);
+  } else {
+    console.log('🔗 [ExecuteChain] Context selectionInfo: MISSING!');
+    console.log('  - selectionInfo.dataRange: MISSING');
+    console.log('  - selectionInfo.columnsWithData:', context?.selectionInfo?.columnsWithData);
+  }
+  
+  // Validate before execution
+  if (!validateCurrentPlan()) {
+    console.log('🔗 [ExecuteChain] Validation failed');
+    showError('Chain execution blocked due to validation errors');
+    enableChainButtons();
+    return;
+  }
+  
+  continueChainExecution();
+}
+
+/**
+ * Continue chain execution after validation
+ */
+function continueChainExecution() {
+  console.log('🔗 [ExecuteChain] Starting execution...');
+  
+  // Get headers preference
+  const addHeaders = document.getElementById('addHeadersCheckbox')?.checked ?? true;
+  console.log('🔗 [ExecuteChain] Add headers:', addHeaders);
+  
+  // Remove confirmation UI
+  const confirmEl = document.querySelector('[data-type="chain-confirmation"]');
+  if (confirmEl) confirmEl.remove();
+  
+  // Show progress UI
+  renderChainProgress(currentChain);
+  
+  // Build chain config
+  const chainConfig = {
+    ...currentChain,
+    addHeaders,
+    model: window.selectedModel || 'GEMINI'
+  };
+  
+  // Execute via GAS
+  console.log('🔗 [ExecuteChain] Calling google.script.run.executeTaskChain...');
+  google.script.run
+    .withSuccessHandler(result => {
+      console.log('🔗 [ExecuteChain] Success:', result);
+      if (result.success) {
+        console.log('🔗 [ExecuteChain] Chain started:', result.chainId);
+        pollChainProgress(result.chainId);
+      } else {
+        showError(result.error || 'Failed to start chain');
+        enableChainButtons();
+      }
+    })
+    .withFailureHandler(error => {
+      console.error('🔗 [ExecuteChain] Error:', error);
+      showError('Failed to execute chain: ' + error.message);
+      enableChainButtons();
+    })
+    .executeTaskChain(chainConfig, window.currentContext);
+}
+
+/**
+ * Enable chain buttons (Run and Cancel)
+ */
+function enableChainButtons() {
+  chainExecuting = false;
+  
+  const runBtn = document.getElementById('runChainBtn');
+  const cancelBtn = document.getElementById('cancelChainBtn');
+  
+  if (runBtn) {
+    runBtn.disabled = false;
+    runBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+    console.log('🔗 [ExecuteChain] Run button enabled');
+  }
+  if (cancelBtn) {
+    cancelBtn.disabled = false;
+    cancelBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+    console.log('🔗 [ExecuteChain] Cancel button enabled');
+  }
+}
+
+/**
+ * Cancel the chain
+ */
+function cancelChain() {
+  currentChain = null;
+  chainExecuting = false;
+  chainParsing = false;
+  
+  // Remove UI elements
+  const confirmEl = document.querySelector('[data-type="chain-confirmation"]');
+  if (confirmEl) confirmEl.remove();
+  
+  const progressEl = document.querySelector('[data-type="chain-progress"]');
+  if (progressEl) progressEl.remove();
+  
+  showNotification('Chain cancelled', 'info');
+}
+
+// ============================================
+// CHAIN POLLING
+// ============================================
+
+/**
+ * Poll for chain progress
+ * 
+ * PERFORMANCE OPTIMIZATIONS:
+ * - Smart adaptive polling: starts slower, speeds up near completion
+ * - Initial delay of 3s (jobs take time to start)
+ * - Base interval of 3s, increasing to 8s for longer jobs
+ * 
+ * SAFEGUARDS to prevent infinite loops:
+ * - STOPS IMMEDIATELY on any quota/rate limit error
+ * - Stops after 3 consecutive errors (with backoff)
+ * - Max 60 polls total (5 minutes)
+ * - Stops if stuck on step 1 too long
+ * 
+ * @param {string} chainId - Chain ID to poll
+ */
+function pollChainProgress(chainId) {
+  console.log('🔗 [Poll] Starting to poll chain:', chainId);
+  
+  let pollCount = 0;
+  let consecutiveErrors = 0;
+  let lastCompletedStep = 0;
+  let stuckCounter = 0;
+  const maxPolls = 60;
+  const maxConsecutiveErrors = 3;
+  const maxStuckPolls = 15;
+  
+  // Adaptive polling configuration
+  const baseInterval = 3000;
+  const maxInterval = 8000;
+  
+  function getNextInterval() {
+    // Start slower, maintain steady pace
+    if (pollCount < 3) return baseInterval;
+    if (pollCount < 10) return baseInterval + 1000;
+    return maxInterval;
+  }
+  
+  function doPoll() {
+    pollCount++;
+    console.log(`🔗 [Poll] #${pollCount}/${maxPolls}`);
+    
+    google.script.run
+      .withSuccessHandler(state => {
+        consecutiveErrors = 0;
+        
+        if (!state) {
+          console.log('🔗 [Poll] No state returned');
+          if (pollCount < maxPolls) setTimeout(doPoll, getNextInterval());
+          return;
+        }
+        
+        // Update UI
+        updateChainProgress(state);
+        
+        // Check for stuck state
+        const currentCompleted = state.steps?.filter(s => s.status === 'completed').length || 0;
+        if (currentCompleted === lastCompletedStep) {
+          stuckCounter++;
+          if (stuckCounter >= maxStuckPolls) {
+            console.log('🔗 [Poll] STOPPED: Stuck on same step too long');
+            showError('Chain appears to be stuck. Please check the sheet for partial results.');
+            enableChainButtons();
+            return;
+          }
+        } else {
+          stuckCounter = 0;
+          lastCompletedStep = currentCompleted;
+        }
+        
+        // Check for completion
+        if (state.status === 'completed') {
+          console.log('🔗 [Poll] STOPPED: Chain completed');
+          onChainComplete(state);
+          return;
+        }
+        
+        // Check for failure
+        if (state.status === 'failed' || state.status === 'error') {
+          console.log('🔗 [Poll] STOPPED: Chain failed');
+          const failedStep = state.steps?.find(s => s.status === 'error');
+          showError(`Task chain failed at step "${failedStep?.description || 'unknown'}": ${failedStep?.error || state.error || 'Unknown error'}`);
+          enableChainButtons();
+          return;
+        }
+        
+        // Check for quota/rate limit errors in any step
+        const quotaError = state.steps?.find(s => 
+          s.error && (s.error.includes('quota') || s.error.includes('rate') || s.error.includes('429'))
+        );
+        if (quotaError) {
+          console.log('🔗 [Poll] STOPPED: Quota/rate limit error detected');
+          showError(`Rate limit reached: ${quotaError.error}`);
+          enableChainButtons();
+          return;
+        }
+        
+        // Continue polling
+        if (pollCount < maxPolls) {
+          setTimeout(doPoll, getNextInterval());
+        } else {
+          console.log('🔗 [Poll] STOPPED: Max polls reached');
+          showError('Chain is taking too long. Check the sheet for partial results.');
+          enableChainButtons();
+        }
+      })
+      .withFailureHandler(error => {
+        consecutiveErrors++;
+        console.error(`🔗 [Poll] Error #${consecutiveErrors}:`, error);
+        
+        // Check for quota errors
+        const errorMsg = error?.message || String(error);
+        if (errorMsg.includes('quota') || errorMsg.includes('rate') || errorMsg.includes('429')) {
+          console.log('🔗 [Poll] STOPPED: Quota error');
+          showError('Rate limit reached. Please wait before trying again.');
+          enableChainButtons();
+          return;
+        }
+        
+        if (consecutiveErrors >= maxConsecutiveErrors) {
+          console.log('🔗 [Poll] STOPPED: Too many consecutive errors');
+          showError('Failed to check chain status after multiple attempts.');
+          enableChainButtons();
+          return;
+        }
+        
+        // Retry with backoff
+        const backoff = Math.min(baseInterval * Math.pow(2, consecutiveErrors), 30000);
+        console.log(`🔗 [Poll] Retrying in ${backoff}ms`);
+        setTimeout(doPoll, backoff);
+      })
+      .getChainState(chainId);
+  }
+  
+  // Start polling after initial delay
+  setTimeout(doPoll, 2000);
+}
+
+// ============================================
+// CHAIN COMPLETION
+// ============================================
+
+/**
+ * Handle chain completion
+ * 
+ * @param {Object} state - Final chain state
+ */
+function onChainComplete(state) {
+  console.log('🔗 [ChainComplete] Chain finished:', state.chainId);
+  
+  chainExecuting = false;
+  enableChainButtons();
+  
+  // Update progress UI to show completion
+  const progressEl = document.getElementById('chainProgressContainer') || 
+                     document.querySelector('[data-type="chain-progress"]');
+  
+  console.log('🔗 [ChainComplete] Progress element found:', !!progressEl);
+  
+  if (progressEl) {
+    // Use requestAnimationFrame to ensure DOM has been painted before updating
+    // This fixes an issue where updates happen too fast after renderChainProgress
+    // and the browser hasn't rendered the initial state yet
+    requestAnimationFrame(function() {
+      // Update container to green theme
+      progressEl.className = 'bg-green-50 rounded-lg p-3 border border-green-200';
+      
+      // Replace the ENTIRE header with completion state
+      // Using innerHTML on the parent is more reliable than outerHTML on children
+      const headerDiv = document.getElementById('chainProgressHeader');
+      if (headerDiv) {
+        headerDiv.innerHTML = '<span class="text-lg">✅</span>' +
+          '<span class="text-[11px] font-medium text-green-700">Task Chain Complete!</span>';
+        console.log('🔗 [ChainComplete] Updated header to complete');
+      }
+      
+      // Update status text
+      const statusEl = document.getElementById('chainProgressStatus');
+      if (statusEl) {
+        const completedSteps = state.steps?.filter(s => s.status === 'completed').length || state.totalSteps || 0;
+        statusEl.textContent = 'All ' + completedSteps + ' steps completed successfully';
+        statusEl.className = 'mt-2 text-[11px] text-green-600 font-medium';
+        console.log('🔗 [ChainComplete] Updated status text');
+      }
+      
+      // CRITICAL: Force-update ALL individual step statuses to "completed"
+      const totalSteps = state.steps?.length || state.totalSteps || 0;
+      for (let idx = 0; idx < totalSteps; idx++) {
+        const indicator = document.getElementById('chain-step-indicator-' + idx);
+        const statusIcon = document.getElementById('chain-step-status-' + idx);
+        
+        if (indicator) {
+          indicator.className = 'step-indicator w-4 h-4 rounded-full bg-green-500 text-white flex items-center justify-center text-[8px]';
+          indicator.textContent = '✓';
+        }
+        if (statusIcon) {
+          statusIcon.textContent = '✅';
+        }
+      }
+      console.log('🔗 [ChainComplete] Force-updated all', totalSteps, 'step indicators to completed');
+      
+      // Second animation frame as a safety net — ensure the paint actually happened
+      requestAnimationFrame(function() {
+        // Re-verify step indicators are green (in case of race condition)
+        for (let idx = 0; idx < totalSteps; idx++) {
+          const indicator = document.getElementById('chain-step-indicator-' + idx);
+          if (indicator && !indicator.classList.contains('bg-green-500')) {
+            indicator.className = 'step-indicator w-4 h-4 rounded-full bg-green-500 text-white flex items-center justify-center text-[8px]';
+            indicator.textContent = '✓';
+            console.log('🔗 [ChainComplete] Re-fixed step', idx, 'indicator (was not green)');
+          }
+        }
+      });
+    });
+    
+  } else {
+    console.warn('🔗 [ChainComplete] Progress element NOT found - cannot update UI');
+  }
+  
+  // Check for chat responses (from analyze steps) and display them
+  const chatSteps = state.steps?.filter(s => s.chatResponse || s.writeResult?.isChat) || [];
+  if (chatSteps.length > 0) {
+    console.log('🔗 [ChainComplete] Found', chatSteps.length, 'chat response(s) to display');
+    
+    chatSteps.forEach(step => {
+      const response = step.chatResponse || step.writeResult?.response;
+      if (response) {
+        // Add the analysis result as an agent message (using existing addAgentMessage function)
+        if (typeof addAgentMessage === 'function') {
+          addAgentMessage('agent', response);
+          console.log('🔗 [ChainComplete] Displayed chat response:', response.substring(0, 100));
+        } else {
+          // Fallback: insert directly into messages div
+          const messagesDiv = document.getElementById('agentMessages');
+          if (messagesDiv) {
+            const responseDiv = document.createElement('div');
+            responseDiv.className = 'bg-blue-50 rounded-lg p-3 text-[11px] text-gray-700 whitespace-pre-wrap';
+            responseDiv.setAttribute('data-type', 'agent');
+            responseDiv.innerHTML = response.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+            messagesDiv.appendChild(responseDiv);
+            console.log('🔗 [ChainComplete] Displayed chat response (fallback):', response.substring(0, 100));
+          }
+        }
+      }
+    });
+  }
+  
+  // Show notification
+  const completedCount = state.steps?.filter(s => s.status === 'completed').length || state.totalSteps;
+  showNotification(`✅ Workflow complete: ${completedCount} steps executed`, 'success');
+  
+  // Save conversation
+  try {
+    if (typeof persistConversation === 'function') {
+      persistConversation();
+    }
+  } catch (e) {
+    console.warn('Failed to save conversation:', e);
+  }
+  
+  // Show next action suggestions
+  // Prefer backend-supplied suggestions if available (from analyze tool)
+  if (window.currentPlan?.suggestedActions?.length > 0 && typeof renderSuggestedActions === 'function') {
+    renderSuggestedActions(window.currentPlan.suggestedActions);
+  } else {
+    showChainNextActionSuggestions(state);
+  }
+  
+  // Clear current chain
+  currentChain = null;
+}
+
+/**
+ * Execute selected suggested actions sequentially
+ * Uses the same pattern as TaskChain execution
+ */
+async function executeSelectedSuggestedActions() {
+  const checkboxes = document.querySelectorAll('.suggested-action-checkbox:checked');
+  if (checkboxes.length === 0) return;
+  
+  // Get selected commands
+  const commands = Array.from(checkboxes).map(cb => ({
+    command: cb.dataset.command,
+    label: cb.dataset.label
+  }));
+  
+  // Dismiss the suggestions UI
+  dismissSuggestedActions();
+  
+  // Show executing indicator
+  showParsingProgress(`Running ${commands.length} suggested action${commands.length > 1 ? 's' : ''}...`);
+  
+  // Execute each command sequentially
+  for (let i = 0; i < commands.length; i++) {
+    const { command, label } = commands[i];
+    updateParsingProgress(`Running: ${label} (${i + 1}/${commands.length})`);
+    
+    try {
+      // Use the existing processCommand function
+      await processCommand(command);
+    } catch (error) {
+      console.error('Error executing suggested action:', error);
+      showError(`Failed to execute "${label}": ${error.message}`);
+    }
+  }
+  
+  removeParsingProgress();
+}
+
+console.log('📦 Agent TaskChain Execution module loaded');
+</script>

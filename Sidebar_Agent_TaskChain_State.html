@@ -1,0 +1,251 @@
+<!--
+  @file Sidebar_Agent_TaskChain_State.html
+  @version 1.0.0
+  @created 2026-02-05
+  
+  TASK CHAIN - State & Constants Module
+  
+  Contains:
+  - Global state variables
+  - Action lists and maps
+  - Utility functions
+  
+  Included by: Sidebar_Agent.html (before TaskChain modules)
+-->
+
+<script>
+// ============================================
+// TASK CHAIN STATE
+// ============================================
+
+let currentChain = null;
+let chainExecuting = false;
+let chainParsing = false;  // Flag to prevent race condition with single-task
+
+// State for tracking suggestion workflow IDs
+let lastSuggestionWorkflowId = null;
+
+// ============================================
+// ACTION DEFINITIONS
+// ============================================
+
+/**
+ * Valid actions list - actions recognized by the system
+ * NOTE: Use camelCase to match GAS backend expectations
+ * NOTE: Includes both AI actions and sheet actions (format, filter, chart, etc.)
+ */
+const VALID_ACTIONS = [
+  // AI processing actions
+  'classify', 'extract', 'summarize', 'generate', 'analyze', 'translate', 'clean', 'score', 'validate', 'rewrite', 'custom',
+  // Sheet actions (SDK Agent tools) - execute instantly without AI worker
+  'formula', 'format', 'conditionalFormat', 'dataValidation', 'filter', 'sheetOps', 'chart', 'writeData', 'table'
+];
+
+/**
+ * Lowercase version of VALID_ACTIONS for case-insensitive matching
+ */
+const VALID_ACTIONS_LOWER = VALID_ACTIONS.map(a => a.toLowerCase());
+
+/**
+ * Map from lowercase action to proper casing (for GAS backend)
+ */
+const ACTION_CASE_MAP = Object.fromEntries(VALID_ACTIONS.map(a => [a.toLowerCase(), a]));
+
+/**
+ * Action aliases - maps alternative names to canonical actions
+ */
+const ACTION_MAP = {
+  // AI action aliases
+  'process': 'analyze',
+  'categorize': 'classify',
+  'find': 'extract',
+  'create': 'generate',
+  'write': 'generate',
+  'rate': 'score',
+  'check': 'validate',
+  'run': 'analyze',
+  'execute': 'analyze',
+  'do': 'analyze',
+  'calculate': 'formula',
+  // Sheet action aliases (must match GAS SheetActions_Main.gs)
+  'formatting': 'format',
+  'style': 'format',
+  'bold': 'format',
+  'italic': 'format',
+  'color': 'format',
+  'border': 'format',
+  'borders': 'format',
+  'banding': 'format',
+  'highlight': 'conditionalFormat',
+  'colorscale': 'conditionalFormat',
+  'conditionalformatting': 'conditionalFormat',
+  'dropdown': 'dataValidation',
+  'checkbox': 'dataValidation',
+  'validation': 'dataValidation',
+  'validate': 'dataValidation',
+  'sort': 'sheetOps',
+  'freeze': 'sheetOps',
+  'unfreeze': 'sheetOps',
+  'hide': 'sheetOps',
+  'show': 'sheetOps',
+  'protect': 'sheetOps',
+  'unprotect': 'sheetOps',
+  'resize': 'sheetOps',
+  'group': 'sheetOps',
+  'ungroup': 'sheetOps',
+  'clear': 'sheetOps',
+  'delete': 'sheetOps',
+  'createtable': 'table',  // Legacy GAS action name
+  'maketable': 'table',
+  'createchart': 'chart',
+  'graph': 'chart',
+  'visualization': 'chart',
+  'paste': 'writeData',
+  'insert': 'writeData',
+  'adddata': 'writeData'
+};
+
+/**
+ * Action icons for UI display (supports both camelCase and lowercase)
+ */
+const ACTION_ICONS = {
+  'translate': '🌐',
+  'summarize': '📝',
+  'classify': '🏷️',
+  'extract': '🔍',
+  'clean': '🧹',
+  'generate': '✨',
+  'analyze': '📊',
+  'process': '⚙️',
+  'format': '🎨',
+  'formula': '🔢',
+  'chart': '📈',
+  'filter': '🔽',
+  'conditionalFormat': '🌈',
+  'conditionalformat': '🌈',
+  'dataValidation': '✅',
+  'datavalidation': '✅',
+  'sheetOps': '⚙️',
+  'sheetops': '⚙️',
+  'writeData': '✍️',
+  'writedata': '✍️',
+  'table': '📋',
+  'score': '⭐',
+  'validate': '✓',
+  'rewrite': '✏️'
+};
+
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
+
+/**
+ * Get icon for action type (case-insensitive)
+ */
+function getActionIcon(action) {
+  if (!action) return '⚡';
+  // Try exact match first, then lowercase
+  return ACTION_ICONS[action] || ACTION_ICONS[action.toLowerCase()] || '⚡';
+}
+
+/**
+ * Check if action is valid (case-insensitive)
+ */
+function isValidAction(action) {
+  if (!action) return false;
+  return VALID_ACTIONS_LOWER.includes(action.toLowerCase());
+}
+
+/**
+ * Normalize action name using alias map
+ * Returns properly cased action name for GAS backend
+ */
+function normalizeAction(action) {
+  if (!action) return 'analyze';
+  const lower = action.toLowerCase().trim();
+  
+  // Check if it's a valid action (case-insensitive)
+  if (VALID_ACTIONS_LOWER.includes(lower)) {
+    // Return the properly cased version
+    return ACTION_CASE_MAP[lower] || action;
+  }
+  
+  // Check alias map
+  if (ACTION_MAP[lower]) {
+    return ACTION_MAP[lower];
+  }
+  
+  return null; // Unknown action
+}
+
+/**
+ * Escape HTML for safe rendering
+ */
+function escapeHtml(text) {
+  if (!text) return '';
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+/**
+ * Show error message using the notification system
+ * Wrapper around showNotification for consistent error handling
+ */
+function showError(message) {
+  if (typeof showNotification === 'function') {
+    showNotification(message, 'error');
+  } else {
+    console.error('ERROR:', message);
+    alert(message);
+  }
+}
+
+/**
+ * Get default output format based on action type
+ */
+function getDefaultOutputFormat(action) {
+  const formatMap = {
+    'summarize': 'short',
+    'extract': 'json',
+    'classify': 'single',
+    'generate': 'paragraph',
+    'translate': 'translated',
+    'clean': 'cleaned',
+    'score': 'number',
+    'validate': 'boolean',
+    'rewrite': 'paragraph',
+    'analyze': 'paragraph',
+    'formula': 'formula',
+    'format': 'format',
+    'chart': 'chart',
+    'filter': 'filter',
+    'table': 'table',
+    'writeData': 'writeData',
+    'sheetOps': 'sheetOps',
+    'conditionalFormat': 'conditionalFormat',
+    'dataValidation': 'dataValidation'
+  };
+  return formatMap[action] || 'json';
+}
+
+/**
+ * Check if a command is destructive (could delete/overwrite data)
+ * @param {string} command - The command text
+ * @returns {boolean} - true if command is potentially destructive
+ */
+function isDestructiveCommand(command) {
+  if (!command) return false;
+  const destructivePatterns = [
+    /\b(delete|remove|clear|erase|wipe|drop)\b/i,
+    /\b(overwrite|replace all|reset)\b/i,
+    /\b(destroy|truncate)\b/i
+  ];
+  return destructivePatterns.some(pattern => pattern.test(command));
+}
+
+console.log('📦 Agent TaskChain State module loaded');
+console.log('📦 VALID_ACTIONS:', VALID_ACTIONS.length, 'items');
+console.log('📦 VALID_ACTIONS_LOWER:', VALID_ACTIONS_LOWER.length, 'items');
+console.log('📦 ACTION_CASE_MAP sample:', Object.entries(ACTION_CASE_MAP).slice(0, 5));
+</script>

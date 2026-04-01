@@ -1,0 +1,795 @@
+<!--
+  @file Sidebar_Bulk.html
+  @version 2.3.0
+  @updated 2026-01-10
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 2.3.0 (2026-01-10): Task templates (Summarize, Extract, Translate, Classify, Clean)
+                        Header-based prompt suggestions
+                        Auto model selection based on task
+  - 2.2.0 (2026-01-10): Extracted from monolithic Sidebar.html
+  - 2.1.0 (2026-01-10): Best-in-class UX (auto-detect, preview, retry)
+  - 2.0.0 (2026-01-09): Initial bulk agent UI
+  
+  ============================================
+  SIDEBAR_BULK.html - Bulk Agent Module
+  ============================================
+  
+  Best-in-class bulk processing functionality:
+  - Smart auto-detection of selected range
+  - Preview mode (first 3 rows)
+  - Incremental live writes
+  - Retry failed rows
+  - Job persistence
+  
+  Included by: Sidebar.html
+  Usage: include('Sidebar_Bulk')
+  
+  Dependencies:
+  - Sidebar_Utils.html (showToast)
+  - Jobs.gs (server functions)
+-->
+
+<script>
+// ============================================
+// BULK AGENT STATE
+// ============================================
+
+let currentJobId = null;
+let pollInterval = null;
+let bulkJobConfig = {};
+let lastWrittenIndex = -1;
+
+// ============================================
+// MAIN ENTRY POINT
+// ============================================
+
+function showBulkAgent() {
+  setActiveTab('tab-bulk');
+  
+  // Check for active jobs first
+  google.script.run
+    .withSuccessHandler(function(activeJobInfo) {
+      if (activeJobInfo.hasActiveJob) {
+        renderResumePanel(activeJobInfo.job);
+      } else {
+        renderBulkForm();
+      }
+    })
+    .withFailureHandler(function() {
+      renderBulkForm();
+    })
+    .checkActiveJobs();
+}
+
+// ============================================
+// RESUME PANEL (for interrupted jobs)
+// ============================================
+
+function renderResumePanel(job) {
+  const content = document.getElementById('content');
+  content.innerHTML = `
+    <div class="space-y-3 animate-in">
+      <div class="card p-4 bg-amber-50 border-amber-200">
+        <div class="flex items-center gap-2 mb-3">
+          <span class="text-xl">📋</span>
+          <div>
+            <h3 class="font-semibold text-sm">Job In Progress</h3>
+            <p class="text-xs text-gray-600">Started ${timeAgo(job.createdAt)}</p>
+          </div>
+        </div>
+        
+        <div class="mb-3">
+          <div class="flex justify-between text-xs mb-1">
+            <span>${job.processedRows}/${job.totalRows} rows</span>
+            <span class="font-bold">${job.progress}%</span>
+          </div>
+          <div class="progress">
+            <div class="progress-bar" style="width: ${job.progress}%"></div>
+          </div>
+        </div>
+        
+        <div class="flex gap-2">
+          <button onclick="resumeJob('${job.id}')" class="btn btn-primary flex-1">
+            ▶️ Resume Watching
+          </button>
+          <button onclick="cancelAndNew('${job.id}')" class="btn btn-destructive">
+            ❌
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================
+// BULK FORM
+// ============================================
+
+function renderBulkForm() {
+  const content = document.getElementById('content');
+  content.innerHTML = `
+    <div class="space-y-3 animate-in">
+      <!-- Header -->
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">🚀 Bulk Agent</h3>
+          <p class="card-description">Best-in-class bulk processing</p>
+        </div>
+      </div>
+
+      <!-- Job Form -->
+      <div id="bulkForm">
+        <!-- Step 1: Smart Input Range -->
+        <div class="card p-3 space-y-2">
+          <h4 class="font-medium text-xs flex items-center gap-1">
+            <span class="bg-gray-900 text-white text-[11px] w-4 h-4 rounded-full flex items-center justify-center">1</span>
+            Input Range
+            <button onclick="detectSelection()" class="ml-auto text-[11px] text-blue-600 hover:underline">
+              ✨ Auto-detect
+            </button>
+          </h4>
+          <input type="text" id="inputRange" placeholder="Select cells & click Auto-detect" class="input">
+          <div id="rangeInfo" class="text-[11px] text-gray-500"></div>
+        </div>
+
+        <!-- Step 2: Task Type (Quick Templates) -->
+        <div class="card p-3 space-y-2 mt-2">
+          <h4 class="font-medium text-xs flex items-center gap-1">
+            <span class="bg-gray-900 text-white text-[11px] w-4 h-4 rounded-full flex items-center justify-center">2</span>
+            What do you want to do?
+          </h4>
+          <div class="grid grid-cols-3 gap-1" id="taskTemplates">
+            <button onclick="selectTask('summarize')" class="task-btn p-2 text-center rounded border hover:bg-gray-50" data-task="summarize">
+              <div class="text-lg">📝</div>
+              <div class="text-[11px]">Summarize</div>
+            </button>
+            <button onclick="selectTask('extract')" class="task-btn p-2 text-center rounded border hover:bg-gray-50" data-task="extract">
+              <div class="text-lg">🔍</div>
+              <div class="text-[11px]">Extract</div>
+            </button>
+            <button onclick="selectTask('translate')" class="task-btn p-2 text-center rounded border hover:bg-gray-50" data-task="translate">
+              <div class="text-lg">🌐</div>
+              <div class="text-[11px]">Translate</div>
+            </button>
+            <button onclick="selectTask('classify')" class="task-btn p-2 text-center rounded border hover:bg-gray-50" data-task="classify">
+              <div class="text-lg">🏷️</div>
+              <div class="text-[11px]">Classify</div>
+            </button>
+            <button onclick="selectTask('clean')" class="task-btn p-2 text-center rounded border hover:bg-gray-50" data-task="clean">
+              <div class="text-lg">🧹</div>
+              <div class="text-[11px]">Clean</div>
+            </button>
+            <button onclick="selectTask('custom')" class="task-btn p-2 text-center rounded border hover:bg-gray-50 active" data-task="custom">
+              <div class="text-lg">✨</div>
+              <div class="text-[11px]">Custom</div>
+            </button>
+          </div>
+          <div id="taskConfig" class="hidden mt-2 p-2 bg-gray-50 rounded text-[11px]"></div>
+        </div>
+
+        <!-- Step 3: Prompt Template -->
+        <div class="card p-3 space-y-2 mt-2">
+          <h4 class="font-medium text-xs flex items-center gap-1">
+            <span class="bg-gray-900 text-white text-[11px] w-4 h-4 rounded-full flex items-center justify-center">3</span>
+            Prompt
+            <button onclick="readHeadersForPrompt()" class="ml-auto text-[11px] text-blue-600 hover:underline">
+              📋 Read headers
+            </button>
+          </h4>
+          <textarea id="promptTemplate" rows="3" placeholder="Describe what you want to do with each row..." class="textarea"></textarea>
+          <p class="text-[11px] text-gray-500">Use <code class="bg-gray-100 px-1 rounded">{{input}}</code> as placeholder</p>
+        </div>
+
+        <!-- Step 4: Model Selection (auto-selected based on task) -->
+        <div class="card p-3 space-y-2 mt-2">
+          <h4 class="font-medium text-xs flex items-center gap-1">
+            <span class="bg-gray-900 text-white text-[11px] w-4 h-4 rounded-full flex items-center justify-center">4</span>
+            Model
+            <span id="modelRecommendation" class="ml-auto text-[11px] text-green-600"></span>
+          </h4>
+          <select id="bulkModel" class="select">
+            <option value="GEMINI">🌐 Gemini 2.5 Flash — Cheapest ($0.08/MTok)</option>
+            <option value="GROQ">⚡ Llama 3.3 70B — Fast ($0.59/MTok)</option>
+            <option value="CHATGPT">🧠 GPT-5 Mini — Balanced ($0.25/MTok)</option>
+            <option value="CLAUDE">🤖 Claude Haiku 4.5 — Quality ($1.00/MTok)</option>
+          </select>
+        </div>
+
+        <!-- Step 5: Output Column -->
+        <div class="card p-3 space-y-2 mt-2">
+          <h4 class="font-medium text-xs flex items-center gap-1">
+            <span class="bg-gray-900 text-white text-[11px] w-4 h-4 rounded-full flex items-center justify-center">5</span>
+            Output Column
+          </h4>
+          <input type="text" id="outputColumn" placeholder="Auto-suggested after detection" class="input" maxlength="3">
+          <p class="text-[11px] text-gray-500">Where to write results</p>
+        </div>
+
+        <!-- Actions -->
+        <div class="mt-3 space-y-2">
+          <button onclick="runPreview()" id="previewBtn" class="btn btn-secondary w-full">
+            👀 Preview First 3 Rows
+          </button>
+          <button id="startBtn" onclick="startBulkJob()" class="btn btn-primary w-full" disabled>
+            ▶️ Start Processing
+          </button>
+        </div>
+      </div>
+
+      <!-- Preview Panel (hidden) -->
+      <div id="previewPanel" class="hidden"></div>
+
+      <!-- Progress Panel (hidden) -->
+      <div id="jobProgress" class="hidden"></div>
+
+      <!-- Job Complete Panel (hidden) -->
+      <div id="jobComplete" class="hidden"></div>
+
+      <!-- Tips -->
+      <div class="card p-3">
+        <h4 class="font-medium text-xs mb-2">💡 Pro Tips</h4>
+        <ul class="text-[11px] text-gray-600 space-y-1">
+          <li>• <span class="font-medium">Preview first</span> to validate your prompt</li>
+          <li>• Results appear <span class="font-medium">live</span> as they complete</li>
+          <li>• Green = success, Red = error</li>
+          <li>• Job continues even if you close this sidebar</li>
+        </ul>
+      </div>
+    </div>
+  `;
+  
+  // Auto-detect on load
+  detectSelection();
+}
+
+// ============================================
+// SMART AUTO-DETECTION
+// ============================================
+
+function detectSelection() {
+  google.script.run
+    .withSuccessHandler(function(info) {
+      if (info.hasSelection && info.hasData) {
+        document.getElementById('inputRange').value = info.range;
+        document.getElementById('outputColumn').value = info.suggestedOutput;
+        document.getElementById('rangeInfo').innerHTML = 
+          '<span class="text-green-600">✓ ' + info.rowCount + ' rows detected</span> → Output: ' + info.suggestedOutput;
+      } else if (info.hasSelection) {
+        document.getElementById('inputRange').value = info.range;
+        document.getElementById('rangeInfo').innerHTML = 
+          '<span class="text-amber-600">⚠️ Selection is empty</span>';
+      } else {
+        document.getElementById('rangeInfo').innerHTML = 
+          '<span class="text-gray-500">Select cells in sheet, then click Auto-detect</span>';
+      }
+    })
+    .withFailureHandler(function(err) {
+      document.getElementById('rangeInfo').innerHTML = 
+        '<span class="text-red-500">Detection failed: ' + err.message + '</span>';
+    })
+    .getSelectedRange();
+}
+
+// ============================================
+// PREVIEW MODE
+// ============================================
+
+function runPreview() {
+  const inputRange = document.getElementById('inputRange').value;
+  const prompt = document.getElementById('promptTemplate').value;
+  const model = document.getElementById('bulkModel').value;
+  const outputColumn = document.getElementById('outputColumn').value;
+  
+  // Validate
+  if (!inputRange) {
+    showToast('Please enter or detect an input range', 'error');
+    return;
+  }
+  if (!prompt) {
+    showToast('Please enter a prompt template', 'error');
+    return;
+  }
+  if (!outputColumn) {
+    showToast('Please enter an output column', 'error');
+    return;
+  }
+  
+  // Show preview panel with loading state
+  document.getElementById('bulkForm').classList.add('hidden');
+  renderPreviewLoading();
+  
+  // Store config
+  bulkJobConfig = { inputRange, prompt, model, outputColumn };
+  
+  // Run preview
+  google.script.run
+    .withSuccessHandler(displayPreviewResults)
+    .withFailureHandler(function(err) {
+      renderPreviewError(err.message);
+    })
+    .previewBulkJob(inputRange, prompt, model, null, 3);
+}
+
+function renderPreviewLoading() {
+  document.getElementById('previewPanel').classList.remove('hidden');
+  document.getElementById('previewPanel').innerHTML = `
+    <div class="card p-3">
+      <div class="flex items-center justify-between mb-3">
+        <h4 class="font-medium text-xs">👀 Preview Results</h4>
+        <span class="badge badge-secondary text-[11px]">Processing...</span>
+      </div>
+      <div class="space-y-2">
+        <div class="skeleton h-12 rounded"></div>
+        <div class="skeleton h-12 rounded"></div>
+        <div class="skeleton h-12 rounded"></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderPreviewError(message) {
+  document.getElementById('previewPanel').innerHTML = `
+    <div class="card p-3">
+      <div class="flex items-center justify-between mb-3">
+        <h4 class="font-medium text-xs">👀 Preview Results</h4>
+        <span class="badge bg-red-100 text-red-600 text-[11px]">Error</span>
+      </div>
+      <div class="text-red-600 text-xs">${message}</div>
+      <button onclick="editPrompt()" class="btn btn-outline w-full mt-3">← Back to Edit</button>
+    </div>
+  `;
+}
+
+function displayPreviewResults(result) {
+  const status = result.allSuccessful ? 
+    '<span class="badge bg-green-100 text-green-600 text-[11px]">✓ All passed</span>' :
+    '<span class="badge bg-amber-100 text-amber-600 text-[11px]">' + result.successCount + '/' + result.previewCount + ' passed</span>';
+  
+  let previewsHtml = '';
+  result.previews.forEach(function(p) {
+    const bgColor = p.success ? 'bg-green-50' : 'bg-red-50';
+    const borderColor = p.success ? 'border-green-200' : 'border-red-200';
+    previewsHtml += `
+      <div class="${bgColor} border ${borderColor} rounded p-2 text-[11px]">
+        <div class="font-medium text-gray-700 truncate">Input: ${p.input}</div>
+        <div class="text-gray-600 mt-1 ${p.success ? '' : 'text-red-600'}">
+          ${p.success ? '→ ' + p.output : '❌ ' + p.error}
+        </div>
+      </div>
+    `;
+  });
+  
+  document.getElementById('previewPanel').innerHTML = `
+    <div class="card p-3">
+      <div class="flex items-center justify-between mb-3">
+        <h4 class="font-medium text-xs">👀 Preview Results</h4>
+        ${status}
+      </div>
+      <div id="previewResults" class="space-y-2 max-h-48 overflow-y-auto">
+        ${previewsHtml}
+      </div>
+      <div class="mt-3 p-2 bg-gray-50 rounded text-xs">
+        <div class="flex justify-between">
+          <span>Total rows:</span>
+          <span class="font-medium">${result.totalRows}</span>
+        </div>
+        <div class="flex justify-between">
+          <span>Estimated cost:</span>
+          <span class="font-medium text-blue-600">$${result.estimatedCost.estimatedCost}</span>
+        </div>
+      </div>
+      <div class="mt-3 flex gap-2">
+        <button onclick="editPrompt()" class="btn btn-outline flex-1">
+          ✏️ Edit Prompt
+        </button>
+        <button onclick="startBulkJob()" class="btn btn-primary flex-1">
+          ▶️ Process All
+        </button>
+      </div>
+    </div>
+  `;
+  
+  bulkJobConfig.rowCount = result.totalRows;
+  bulkJobConfig.startRow = 2;
+}
+
+function editPrompt() {
+  document.getElementById('previewPanel').classList.add('hidden');
+  document.getElementById('bulkForm').classList.remove('hidden');
+}
+
+// ============================================
+// JOB EXECUTION
+// ============================================
+
+function startBulkJob() {
+  if (!bulkJobConfig.inputRange) {
+    showToast('Please run preview first', 'error');
+    return;
+  }
+  
+  // Hide form/preview, show progress
+  document.getElementById('bulkForm').classList.add('hidden');
+  document.getElementById('previewPanel').classList.add('hidden');
+  renderProgressPanel();
+  
+  lastWrittenIndex = -1;
+  
+  // Get input values and create job
+  google.script.run
+    .withSuccessHandler(function(inputData) {
+      google.script.run
+        .withSuccessHandler(function(result) {
+          currentJobId = result.id;
+          bulkJobConfig.totalRows = result.totalRows;
+          showToast('Job started! Results will appear live.', 'success');
+          startPolling();
+        })
+        .withFailureHandler(function(err) {
+          showToast('Failed to create job: ' + err.message, 'error');
+          document.getElementById('jobProgress').classList.add('hidden');
+          document.getElementById('bulkForm').classList.remove('hidden');
+        })
+        .createBulkJob(inputData, bulkJobConfig.prompt, bulkJobConfig.model);
+    })
+    .withFailureHandler(function(err) {
+      showToast('Failed to read range: ' + err.message, 'error');
+      document.getElementById('jobProgress').classList.add('hidden');
+      document.getElementById('bulkForm').classList.remove('hidden');
+    })
+    .getRangeValues(bulkJobConfig.inputRange);
+}
+
+function renderProgressPanel() {
+  document.getElementById('jobProgress').classList.remove('hidden');
+  document.getElementById('jobProgress').innerHTML = `
+    <div class="card p-3 bg-blue-50">
+      <div class="flex justify-between items-center mb-2">
+        <span class="font-medium text-xs">Processing...</span>
+        <span id="progressPercent" class="text-xs font-bold">0%</span>
+      </div>
+      <div class="progress">
+        <div id="progressBar" class="progress-bar transition-all duration-300"></div>
+      </div>
+      <div class="mt-2 grid grid-cols-3 gap-2 text-center text-[11px]">
+        <div>
+          <div id="successCount" class="font-bold text-green-600">0</div>
+          <div class="text-gray-500">Success</div>
+        </div>
+        <div>
+          <div id="processingCount" class="font-bold text-blue-600">0</div>
+          <div class="text-gray-500">Processing</div>
+        </div>
+        <div>
+          <div id="errorCount" class="font-bold text-red-600">0</div>
+          <div class="text-gray-500">Errors</div>
+        </div>
+      </div>
+      <p id="progressStatus" class="text-[11px] text-gray-600 mt-2 text-center">Initializing...</p>
+    </div>
+    <button onclick="cancelCurrentJob()" class="btn btn-destructive w-full mt-2">
+      ❌ Cancel Job
+    </button>
+  `;
+}
+
+// ============================================
+// POLLING & PROGRESS
+// ============================================
+
+function startPolling() {
+  pollInterval = setInterval(function() {
+    google.script.run
+      .withSuccessHandler(updateProgress)
+      .withFailureHandler(function(err) {
+        console.error('Polling error:', err);
+      })
+      .getJobStatus(currentJobId);
+  }, 2000);
+}
+
+function updateProgress(job) {
+  const percent = job.progress || 0;
+  document.getElementById('progressPercent').textContent = percent + '%';
+  document.getElementById('progressBar').style.width = percent + '%';
+  
+  const successCount = job.successCount || job.processedRows || 0;
+  const errorCount = job.errorCount || 0;
+  const remaining = (job.totalRows || 0) - successCount - errorCount;
+  
+  document.getElementById('successCount').textContent = successCount;
+  document.getElementById('processingCount').textContent = remaining > 0 ? remaining : 0;
+  document.getElementById('errorCount').textContent = errorCount;
+  document.getElementById('progressStatus').textContent = 
+    job.processedRows + '/' + job.totalRows + ' rows • ' + job.status;
+  
+  // Incremental write results
+  if (job.results && job.results.length > 0) {
+    writeIncrementalResults(job.results);
+  }
+  
+  if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+    clearInterval(pollInterval);
+    renderJobComplete(job);
+  }
+}
+
+function writeIncrementalResults(results) {
+  google.script.run
+    .withSuccessHandler(function() {})
+    .writeIncrementalResults(
+      currentJobId, 
+      results, 
+      bulkJobConfig.outputColumn, 
+      bulkJobConfig.startRow || 2,
+      true
+    );
+}
+
+// ============================================
+// JOB COMPLETE
+// ============================================
+
+function renderJobComplete(job) {
+  document.getElementById('jobProgress').classList.add('hidden');
+  document.getElementById('jobComplete').classList.remove('hidden');
+  
+  const hasErrors = (job.errorCount || 0) > 0;
+  const successCount = job.successCount || job.processedRows || 0;
+  
+  let errorDetailsHtml = '';
+  if (hasErrors && job.errors && job.errors.length > 0) {
+    let errorListHtml = '';
+    job.errors.slice(0, 10).forEach(function(e) {
+      errorListHtml += '<div class="p-1 bg-red-50 rounded">Row ' + (e.rowIndex + 2) + ': ' + e.error + '</div>';
+    });
+    if (job.errors.length > 10) {
+      errorListHtml += '<div class="text-gray-500">...and ' + (job.errors.length - 10) + ' more</div>';
+    }
+    errorDetailsHtml = `
+      <div class="card p-3 mt-2">
+        <h4 class="font-medium text-xs mb-2 text-red-600">❌ Failed Rows</h4>
+        <div class="space-y-1 max-h-32 overflow-y-auto text-[11px]">${errorListHtml}</div>
+        <button onclick="retryFailed()" class="btn btn-secondary w-full mt-2">🔄 Retry Failed Rows</button>
+      </div>
+    `;
+  }
+  
+  const cardClass = hasErrors ? 'bg-amber-50' : 'bg-green-50';
+  const icon = hasErrors ? '⚠️' : '✅';
+  const title = hasErrors ? 'Completed with Errors' : 'Job Complete!';
+  const message = hasErrors 
+    ? successCount + ' succeeded, ' + job.errorCount + ' failed'
+    : 'Processed ' + successCount + ' rows → Column ' + bulkJobConfig.outputColumn;
+  
+  document.getElementById('jobComplete').innerHTML = `
+    <div class="card p-4 text-center ${cardClass}">
+      <div class="text-3xl mb-2">${icon}</div>
+      <h4 class="font-semibold text-sm">${title}</h4>
+      <p class="text-xs text-gray-600 mt-1">${message}</p>
+    </div>
+    ${errorDetailsHtml}
+    <div class="flex gap-2 mt-2">
+      <button onclick="clearHighlights()" class="btn btn-outline flex-1">🎨 Clear Colors</button>
+      <button onclick="showBulkAgent()" class="btn btn-primary flex-1">🔄 New Job</button>
+    </div>
+  `;
+  
+  bulkJobConfig.lastJobId = currentJobId;
+  currentJobId = null;
+}
+
+// ============================================
+// JOB ACTIONS
+// ============================================
+
+function retryFailed() {
+  const jobId = currentJobId || bulkJobConfig.lastJobId;
+  if (!jobId) {
+    showToast('No job to retry', 'error');
+    return;
+  }
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      currentJobId = jobId;
+      showToast('Retrying ' + result.retriedCount + ' rows...', 'success');
+      document.getElementById('jobComplete').classList.add('hidden');
+      renderProgressPanel();
+      startPolling();
+    })
+    .withFailureHandler(function(err) {
+      showToast('Retry failed: ' + err.message, 'error');
+    })
+    .retryFailedRows(jobId);
+}
+
+function cancelCurrentJob() {
+  if (!currentJobId) return;
+  clearInterval(pollInterval);
+  
+  google.script.run
+    .withSuccessHandler(function() {
+      showToast('Job cancelled', 'success');
+      document.getElementById('jobProgress').classList.add('hidden');
+      document.getElementById('bulkForm').classList.remove('hidden');
+      currentJobId = null;
+    })
+    .withFailureHandler(function(err) {
+      showToast('Failed to cancel: ' + err.message, 'error');
+    })
+    .cancelJob(currentJobId);
+}
+
+function cancelAndNew(jobId) {
+  google.script.run
+    .withSuccessHandler(function() {
+      renderBulkForm();
+    })
+    .cancelJob(jobId);
+}
+
+function resumeJob(jobId) {
+  currentJobId = jobId;
+  renderProgressPanel();
+  startPolling();
+}
+
+function clearHighlights() {
+  google.script.run
+    .withSuccessHandler(function() {
+      showToast('Highlights cleared', 'success');
+    })
+    .clearResultHighlights(bulkJobConfig.outputColumn, bulkJobConfig.startRow || 2, bulkJobConfig.rowCount || 100);
+}
+
+// ============================================
+// TASK TEMPLATES
+// ============================================
+
+const TASK_TEMPLATES = {
+  summarize: {
+    name: 'Summarize',
+    icon: '📝',
+    prompt: 'Summarize this text in 1-2 sentences:\n\n{{input}}',
+    model: 'GEMINI',
+    config: null
+  },
+  extract: {
+    name: 'Extract',
+    icon: '🔍',
+    prompt: 'Extract the following from this text:\n- Key entities (names, places, organizations)\n- Main topic\n- Key numbers/dates\n\nText: {{input}}',
+    model: 'GEMINI',
+    config: { showField: true, fieldLabel: 'What to extract:', fieldPlaceholder: 'e.g., email addresses, phone numbers, company names' }
+  },
+  translate: {
+    name: 'Translate',
+    icon: '🌐',
+    prompt: 'Translate this text to English. Keep brand names and proper nouns unchanged:\n\n{{input}}',
+    model: 'GEMINI',
+    config: { showField: true, fieldLabel: 'Target language:', fieldPlaceholder: 'e.g., Spanish, French, Japanese' }
+  },
+  classify: {
+    name: 'Classify',
+    icon: '🏷️',
+    prompt: 'Classify this text into ONE of these categories: [Positive, Negative, Neutral]\n\nText: {{input}}\n\nCategory:',
+    model: 'GROQ',
+    config: { showField: true, fieldLabel: 'Categories (comma-separated):', fieldPlaceholder: 'e.g., Positive, Negative, Neutral' }
+  },
+  clean: {
+    name: 'Clean',
+    icon: '🧹',
+    prompt: 'Clean this text by:\n- Removing extra whitespace\n- Fixing capitalization\n- Removing unwanted suffixes (Ltd, Inc, LLC)\n- Standardizing format\n\nInput: {{input}}\n\nCleaned:',
+    model: 'GROQ',
+    config: null
+  },
+  custom: {
+    name: 'Custom',
+    icon: '✨',
+    prompt: '',
+    model: 'GEMINI',
+    config: null
+  }
+};
+
+let selectedTask = 'custom';
+
+function selectTask(taskId) {
+  selectedTask = taskId;
+  const task = TASK_TEMPLATES[taskId];
+  
+  // Update UI - highlight selected
+  document.querySelectorAll('.task-btn').forEach(btn => {
+    btn.classList.remove('active', 'bg-blue-50', 'border-blue-300');
+  });
+  const selectedBtn = document.querySelector(`[data-task="${taskId}"]`);
+  if (selectedBtn) {
+    selectedBtn.classList.add('active', 'bg-blue-50', 'border-blue-300');
+  }
+  
+  // Update prompt if not custom
+  if (taskId !== 'custom' && task.prompt) {
+    document.getElementById('promptTemplate').value = task.prompt;
+  }
+  
+  // Update model recommendation
+  if (task.model) {
+    document.getElementById('bulkModel').value = task.model;
+    document.getElementById('modelRecommendation').textContent = '✓ Recommended for ' + task.name;
+  }
+  
+  // Show task-specific config
+  const configDiv = document.getElementById('taskConfig');
+  if (task.config && task.config.showField) {
+    configDiv.innerHTML = `
+      <label class="font-medium">${task.config.fieldLabel}</label>
+      <input type="text" id="taskConfigField" class="input mt-1" 
+             placeholder="${task.config.fieldPlaceholder}"
+             onchange="updatePromptWithConfig()">
+    `;
+    configDiv.classList.remove('hidden');
+  } else {
+    configDiv.classList.add('hidden');
+  }
+}
+
+function updatePromptWithConfig() {
+  const task = TASK_TEMPLATES[selectedTask];
+  const configValue = document.getElementById('taskConfigField')?.value;
+  
+  if (!configValue || !task) return;
+  
+  let prompt = task.prompt;
+  
+  // Update prompt based on task type
+  if (selectedTask === 'translate') {
+    prompt = `Translate this text to ${configValue}. Keep brand names and proper nouns unchanged:\n\n{{input}}`;
+  } else if (selectedTask === 'classify') {
+    prompt = `Classify this text into ONE of these categories: [${configValue}]\n\nText: {{input}}\n\nCategory:`;
+  } else if (selectedTask === 'extract') {
+    prompt = `Extract ${configValue} from this text. Return only the extracted value(s), nothing else:\n\n{{input}}`;
+  }
+  
+  document.getElementById('promptTemplate').value = prompt;
+}
+
+// ============================================
+// HEADER READING
+// ============================================
+
+function readHeadersForPrompt() {
+  google.script.run
+    .withSuccessHandler(function(headers) {
+      if (headers && headers.length > 0) {
+        const headerList = headers.join(', ');
+        const suggestion = `Based on the columns [${headerList}], process each row and:\n\n{{input}}`;
+        document.getElementById('promptTemplate').value = suggestion;
+        showToast('Headers detected: ' + headerList, 'success');
+      } else {
+        showToast('No headers found in row 1', 'error');
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast('Failed to read headers: ' + err.message, 'error');
+    })
+    .getSheetHeaders();
+}
+
+// ============================================
+// UTILITIES
+// ============================================
+
+function timeAgo(dateString) {
+  if (!dateString) return 'recently';
+  const date = new Date(dateString);
+  const now = new Date();
+  const seconds = Math.floor((now - date) / 1000);
+  
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) return Math.floor(seconds / 60) + ' min ago';
+  if (seconds < 86400) return Math.floor(seconds / 3600) + ' hours ago';
+  return Math.floor(seconds / 86400) + ' days ago';
+}
+</script>

@@ -1,37 +1,367 @@
 <!DOCTYPE html>
+<!--
+  @file PromptManager.html
+  @version 2.0.0
+  @updated 2026-01-10
+  @author AISheeter Team
+  
+  CHANGELOG:
+  - 2.0.0 (2026-01-10): Updated to shadcn-inspired design system
+  - 1.0.0 (2024-10-xx): Initial implementation
+  
+  ============================================
+  PROMPTMANAGER.html - Saved Prompts Modal
+  ============================================
+  
+  Dialog for managing saved prompts:
+  - Create new prompts
+  - Edit existing prompts
+  - Delete prompts
+  - Use template variables
+  
+  Opened by: google.script.run.openPromptManager()
+-->
 <html>
   <head>
     <base target="_top">
-    <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/add-ons1.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            background: 'hsl(0 0% 100%)',
+            foreground: 'hsl(222.2 84% 4.9%)',
+            primary: 'hsl(222.2 47.4% 11.2%)',
+            'primary-foreground': 'hsl(210 40% 98%)',
+            secondary: 'hsl(210 40% 96.1%)',
+            muted: 'hsl(210 40% 96.1%)',
+            'muted-foreground': 'hsl(215.4 16.3% 46.9%)',
+            border: 'hsl(214.3 31.8% 91.4%)',
+            destructive: 'hsl(0 84.2% 60.2%)',
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
+        }
+      }
+    }
+  </script>
+  
+  <style>
+    * { border-color: hsl(214.3 31.8% 91.4%); }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .card {
+      background: white;
+      border: 1px solid hsl(214.3 31.8% 91.4%);
+      border-radius: 0.75rem;
+      box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      border-radius: 0.375rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      transition: all 150ms;
+      cursor: pointer;
+      border: none;
+      padding: 0.5rem 1rem;
+      height: 2.25rem;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: hsl(222.2 47.4% 11.2%); color: white; }
+    .btn-primary:hover { background: hsl(222.2 47.4% 20%); }
+    .btn-secondary { background: hsl(210 40% 96.1%); color: hsl(222.2 47.4% 11.2%); }
+    .btn-secondary:hover { background: hsl(210 40% 90%); }
+    .btn-outline { background: transparent; border: 1px solid hsl(214.3 31.8% 91.4%); color: hsl(222.2 47.4% 11.2%); }
+    .btn-outline:hover { background: hsl(210 40% 96.1%); }
+    .btn-destructive { background: hsl(0 84.2% 60.2%); color: white; }
+    .btn-destructive:hover { background: hsl(0 84.2% 50%); }
+    .btn-sm { height: 2rem; padding: 0 0.75rem; font-size: 0.75rem; }
+
+    .input {
+      display: flex;
+      height: 2.25rem;
+      width: 100%;
+      border-radius: 0.375rem;
+      border: 1px solid hsl(214.3 31.8% 91.4%);
+      background: transparent;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.875rem;
+      transition: all 150ms;
+    }
+    .input::placeholder { color: hsl(215.4 16.3% 46.9%); }
+    .input:focus {
+      outline: none;
+      border-color: hsl(222.2 84% 4.9%);
+      box-shadow: 0 0 0 2px hsl(222.2 84% 4.9% / 0.1);
+    }
+
+    .textarea {
+      width: 100%;
+      min-height: 6rem;
+      border-radius: 0.375rem;
+      border: 1px solid hsl(214.3 31.8% 91.4%);
+      padding: 0.5rem 0.75rem;
+      font-size: 0.875rem;
+      resize: vertical;
+    }
+    .textarea:focus {
+      outline: none;
+      border-color: hsl(222.2 84% 4.9%);
+      box-shadow: 0 0 0 2px hsl(222.2 84% 4.9% / 0.1);
+    }
+
+    .label { font-size: 0.75rem; font-weight: 500; margin-bottom: 0.375rem; display: block; color: hsl(215.4 16.3% 46.9%); }
+
+    .toast {
+      position: fixed;
+      bottom: 1rem;
+      right: 1rem;
+      padding: 0.75rem 1rem;
+      border-radius: 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      z-index: 100;
+      animation: slideIn 200ms ease-out;
+    }
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: hsl(214.3 31.8% 85%); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: hsl(214.3 31.8% 75%); }
+
+    .prompt-card {
+      border: 1px solid hsl(214.3 31.8% 91.4%);
+      border-radius: 0.5rem;
+      padding: 0.75rem;
+      margin-bottom: 0.5rem;
+      transition: all 150ms;
+    }
+    .prompt-card:hover {
+      border-color: hsl(214.3 31.8% 80%);
+      box-shadow: 0 2px 4px 0 rgb(0 0 0 / 0.05);
+      }
+    </style>
+
     <script>
-      // Functions to interact with the backend via Google Apps Script
       function loadPrompts() {
-        google.script.run.withSuccessHandler(displayPrompts).getSavedPrompts();
+        google.script.run.withSuccessHandler(displayPrompts).withFailureHandler(handleError).getSavedPrompts();
       }
       
       function displayPrompts(prompts) {
-        // Populate the UI with saved prompts
+        var promptList = document.getElementById('promptList');
+        promptList.innerHTML = '';
+      
+      if (!prompts || prompts.length === 0) {
+        promptList.innerHTML = `
+          <div class="text-center py-8 text-gray-400">
+            <div class="text-3xl mb-2">📝</div>
+            <p class="text-sm">No saved prompts yet</p>
+          </div>
+        `;
+        return;
       }
+      
+        prompts.forEach(function(prompt) {
+          var promptDiv = document.createElement('div');
+        promptDiv.className = 'prompt-card';
+          promptDiv.innerHTML = `
+          <div class="flex items-start justify-between gap-2 mb-2">
+            <h4 class="font-semibold text-sm">${escapeHtml(prompt.name)}</h4>
+            <div class="flex gap-1 flex-shrink-0">
+              <button onclick="editPrompt('${prompt.id}', '${escapeAttr(prompt.name)}', '${escapeAttr(prompt.prompt)}', '${escapeAttr(prompt.variables || '')}')" class="btn btn-outline btn-sm">Edit</button>
+              <button onclick="deletePrompt('${prompt.id}')" class="btn btn-destructive btn-sm">Delete</button>
+            </div>
+          </div>
+          <p class="text-xs text-gray-600 mb-1 line-clamp-2">${escapeHtml(prompt.prompt)}</p>
+          ${prompt.variables ? `<p class="text-[11px] text-gray-400">Variables: ${escapeHtml(prompt.variables)}</p>` : ''}
+          `;
+          promptList.appendChild(promptDiv);
+        });
+      }
+    
+    function escapeHtml(text) {
+      var div = document.createElement('div');
+      div.textContent = text || '';
+      return div.innerHTML;
+    }
+    
+    function escapeAttr(text) {
+      return (text || '').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n');
+    }
       
       function saveNewPrompt() {
         var name = document.getElementById('promptName').value;
         var prompt = document.getElementById('promptText').value;
         var variables = document.getElementById('promptVariables').value;
-        google.script.run.withSuccessHandler(loadPrompts).savePrompt(name, prompt, variables);
+        
+        if (!name || !prompt) {
+        showToast('Name and prompt are required', 'error');
+          return;
+        }
+        
+        google.script.run
+          .withSuccessHandler(function(result) {
+            clearForm();
+            loadPrompts();
+          showToast('Prompt saved!', 'success');
+          })
+          .withFailureHandler(handleError)
+          .savePrompt(name, prompt, variables);
       }
       
-      // Add functions for updating and deleting prompts
+      function editPrompt(id, name, promptText, variables) {
+        document.getElementById('promptId').value = id;
+      document.getElementById('promptName').value = name.replace(/\\'/g, "'").replace(/\\n/g, '\n');
+      document.getElementById('promptText').value = promptText.replace(/\\'/g, "'").replace(/\\n/g, '\n');
+      document.getElementById('promptVariables').value = (variables || '').replace(/\\'/g, "'");
+        document.getElementById('saveButton').textContent = 'Update Prompt';
+        document.getElementById('saveButton').onclick = updatePrompt;
+      document.getElementById('cancelButton').style.display = 'inline-flex';
+      
+      // Scroll to form
+      document.getElementById('formSection').scrollIntoView({ behavior: 'smooth' });
+      }
+      
+      function updatePrompt() {
+        var id = document.getElementById('promptId').value;
+        var name = document.getElementById('promptName').value;
+        var prompt = document.getElementById('promptText').value;
+        var variables = document.getElementById('promptVariables').value;
+        
+        if (!name || !prompt) {
+        showToast('Name and prompt are required', 'error');
+          return;
+        }
+        
+        google.script.run
+          .withSuccessHandler(function(result) {
+            clearForm();
+            loadPrompts();
+          showToast('Prompt updated!', 'success');
+          })
+          .withFailureHandler(handleError)
+          .updatePrompt(id, name, prompt, variables);
+      }
+      
+      function deletePrompt(id) {
+      if (confirm('Delete this prompt?')) {
+          google.script.run
+            .withSuccessHandler(function(result) {
+              loadPrompts();
+            showToast('Prompt deleted', 'success');
+            })
+            .withFailureHandler(handleError)
+            .deletePrompt(id);
+        }
+      }
+
+      function clearForm() {
+        document.getElementById('promptId').value = '';
+        document.getElementById('promptName').value = '';
+        document.getElementById('promptText').value = '';
+        document.getElementById('promptVariables').value = '';
+        document.getElementById('saveButton').textContent = 'Save Prompt';
+        document.getElementById('saveButton').onclick = saveNewPrompt;
+      document.getElementById('cancelButton').style.display = 'none';
+      }
+
+    function showToast(message, type = 'default') {
+      var existing = document.querySelector('.toast');
+      if (existing) existing.remove();
+
+      var toast = document.createElement('div');
+      var colors = {
+        default: 'bg-gray-900 text-white',
+        success: 'bg-emerald-600 text-white',
+        error: 'bg-red-600 text-white'
+      };
+      
+      toast.className = 'toast ' + (colors[type] || colors.default);
+      toast.textContent = message;
+      document.body.appendChild(toast);
+      
+        setTimeout(function() {
+        toast.style.opacity = '0';
+        setTimeout(function() { toast.remove(); }, 200);
+        }, 3000);
+      }
+
+      function handleError(error) {
+        console.error('Error:', error);
+      showToast(error.message || 'An error occurred', 'error');
+      }
     </script>
   </head>
-  <body onload="loadPrompts()">
-    <div class="sidebar">
-      <h3>Saved Prompts</h3>
-      <div id="promptList"></div>
-      <h3>Add New Prompt</h3>
-      <input type="text" id="promptName" placeholder="Prompt Name">
-      <textarea id="promptText" placeholder="Enter your prompt here"></textarea>
-      <input type="text" id="promptVariables" placeholder="Variable1,Variable2,Variable3">
-      <button onclick="saveNewPrompt()">Save Prompt</button>
+
+<body onload="loadPrompts()" class="bg-gray-50 min-h-screen">
+  <!-- Header -->
+  <header class="sticky top-0 z-50 border-b bg-white/95 backdrop-blur">
+    <div class="flex h-12 items-center justify-between px-4">
+      <div class="flex items-center gap-2">
+        <span class="text-lg">📝</span>
+        <span class="font-semibold text-sm">Prompt Manager</span>
+      </div>
+      <button onclick="google.script.host.close()" class="btn btn-outline btn-sm">Close</button>
     </div>
+  </header>
+
+  <main class="max-w-2xl mx-auto p-4 space-y-4">
+    <!-- Form Section -->
+    <section id="formSection" class="card p-4">
+      <h3 class="font-semibold text-sm mb-3">Add / Edit Prompt</h3>
+      
+        <input type="hidden" id="promptId">
+      
+      <div class="space-y-3">
+        <div>
+          <label class="label">Prompt Name</label>
+          <input type="text" id="promptName" placeholder="e.g., Summarize Article" class="input">
+        </div>
+        
+        <div>
+          <label class="label">Prompt Template</label>
+          <textarea id="promptText" placeholder="Enter your prompt here. Use {variable} for placeholders." class="textarea"></textarea>
+        </div>
+        
+        <div>
+          <label class="label">Variables (comma-separated)</label>
+          <input type="text" id="promptVariables" placeholder="article_text, language, length" class="input">
+        </div>
+        
+        <div class="flex gap-2">
+          <button id="saveButton" onclick="saveNewPrompt()" class="btn btn-primary flex-1">Save Prompt</button>
+          <button id="cancelButton" onclick="clearForm()" class="btn btn-outline" style="display: none;">Cancel</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Saved Prompts -->
+    <section class="card p-4">
+      <h3 class="font-semibold text-sm mb-3">Saved Prompts</h3>
+      <div id="promptList" class="max-h-80 overflow-y-auto">
+        <div class="text-center py-8 text-gray-400">
+          <div class="animate-pulse">Loading...</div>
+        </div>
+      </div>
+    </section>
+  </main>
   </body>
 </html>

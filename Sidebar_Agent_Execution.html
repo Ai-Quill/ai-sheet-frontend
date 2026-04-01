@@ -180,6 +180,7 @@
           return;
         }
         currentPlan = modifiedPlan;
+        window.currentPlan = modifiedPlan;
         continueExecutePlan();
       }).catch(function(err) {
         console.warn('Overwrite check error, proceeding:', err);

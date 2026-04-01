@@ -187,6 +187,143 @@ function parseTaskChain(command, context, model) {
 }
 
 /**
+ * AI-powered command classifier fallback.
+ * Called from the frontend when the backend SDK agent times out or fails.
+ * Uses the user's own API key to make a lightweight classification call
+ * that determines the action type and builds an executable workflow.
+ *
+ * @param {string} command - User's natural language command
+ * @param {Object} context - Spreadsheet context (headers, data range, sample data)
+ * @param {string} model - Model selected in the UI (e.g., 'CHATGPT', 'GEMINI')
+ * @return {Object} Workflow result with steps array, or { isMultiStep: false } if classification fails
+ */
+function classifyCommandWithAI(command, context, model) {
+  Logger.log('[AIClassifier] Classifying command: ' + (command || '').substring(0, 80));
+  
+  var provider = model || getAgentModel() || 'GEMINI';
+  // Strip managed prefix if present
+  if (provider.indexOf('MANAGED:') === 0) {
+    provider = 'GEMINI';
+  }
+  
+  var apiKey = getUserApiKey(provider);
+  if (!apiKey) {
+    Logger.log('[AIClassifier] No API key for provider: ' + provider);
+    return { isMultiStep: false, steps: [], summary: 'No API key available' };
+  }
+  
+  // Extract context info for the prompt
+  var headerRow = context.headerRow || {};
+  var columnsWithData = context.columnsWithData || (context.selectionInfo ? context.selectionInfo.columnsWithData : null) || Object.keys(headerRow);
+  var dataStartRow = context.dataStartRow || (context.selectionInfo ? context.selectionInfo.dataStartRow : null) || 2;
+  var dataEndRow = context.dataEndRow || (context.selectionInfo ? context.selectionInfo.dataEndRow : null) || 100;
+  var sampleData = context.sampleData || {};
+  
+  // Build a concise context summary for the AI
+  var headerList = [];
+  for (var col in headerRow) {
+    if (headerRow.hasOwnProperty(col)) {
+      var samples = sampleData[col] || [];
+      headerList.push(col + ': ' + headerRow[col] + ' (e.g. ' + (samples[0] || 'N/A') + ')');
+    }
+  }
+  
+  var prompt = 'You are a spreadsheet command classifier. Given a user command and spreadsheet context, output a JSON object that describes the workflow to execute.\n\n' +
+    'USER COMMAND: "' + command + '"\n\n' +
+    'SPREADSHEET CONTEXT:\n' +
+    '- Columns: ' + headerList.join(', ') + '\n' +
+    '- Data range: rows ' + dataStartRow + ' to ' + dataEndRow + '\n' +
+    '- Columns with data: ' + columnsWithData.join(', ') + '\n\n' +
+    'AVAILABLE ACTIONS: analyze, sort, chart, conditionalFormat, filter, format, formula, sheetOps, writeData, table\n\n' +
+    'Respond with ONLY valid JSON (no markdown, no explanation). Use this schema:\n' +
+    '{\n' +
+    '  "action": "primary action name",\n' +
+    '  "summary": "short description",\n' +
+    '  "steps": [\n' +
+    '    {\n' +
+    '      "action": "action name",\n' +
+    '      "description": "what this step does",\n' +
+    '      "inputColumns": ["A", "B"],\n' +
+    '      "config": { ...action-specific config... }\n' +
+    '    }\n' +
+    '  ]\n' +
+    '}\n\n' +
+    'For SORT actions, config must include: { "operations": [{ "operation": "sort", "range": "A2:J16", "sortBy": [{ "column": "C", "ascending": false }] }] }\n' +
+    'For ANALYZE actions, config is optional. Just set action to "analyze".\n' +
+    'For CHART actions, config must include: { "chartType": "COLUMN", "title": "...", "domainColumn": "A", "dataColumns": ["C"], "position": "NEW_SHEET" }\n';
+  
+  try {
+    var responseText = _callAIForAnalysisChat(prompt, provider, apiKey);
+    if (!responseText) {
+      Logger.log('[AIClassifier] No response from AI');
+      return { isMultiStep: false, steps: [] };
+    }
+    
+    // Extract JSON from the response (handle potential markdown wrapping)
+    var jsonStr = responseText.trim();
+    if (jsonStr.indexOf('```') !== -1) {
+      var jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (jsonMatch) jsonStr = jsonMatch[1].trim();
+    }
+    
+    var parsed = JSON.parse(jsonStr);
+    Logger.log('[AIClassifier] Parsed result: ' + JSON.stringify(parsed).substring(0, 500));
+    
+    if (!parsed.steps || parsed.steps.length === 0) {
+      Logger.log('[AIClassifier] No steps in AI response');
+      return { isMultiStep: false, steps: [] };
+    }
+    
+    // Build the workflow result in the same format the backend produces
+    var firstCol = columnsWithData[0] || 'A';
+    var lastCol = columnsWithData[columnsWithData.length - 1] || 'A';
+    var inputRange = firstCol + dataStartRow + ':' + lastCol + dataEndRow;
+    
+    var steps = [];
+    for (var i = 0; i < parsed.steps.length; i++) {
+      var step = parsed.steps[i];
+      var stepAction = step.action || 'analyze';
+      
+      // Map sort action to sheetOps (backend format)
+      var outputFormat = stepAction;
+      if (stepAction === 'sort') {
+        stepAction = 'sheetOps';
+        outputFormat = 'sheetOps';
+      }
+      
+      steps.push({
+        id: 'step_' + (i + 1),
+        order: i + 1,
+        action: stepAction,
+        description: step.description || parsed.summary || command,
+        prompt: command,
+        question: stepAction === 'analyze' ? command : undefined,
+        outputFormat: outputFormat,
+        inputColumns: step.inputColumns || columnsWithData,
+        config: step.config || undefined
+      });
+    }
+    
+    return {
+      isMultiStep: steps.length > 1,
+      isCommand: true,
+      _usedSDKAgent: true,
+      _usedAIClassifier: true,
+      summary: parsed.summary || 'AI-classified workflow',
+      clarification: parsed.summary || command,
+      outputMode: steps[0].action === 'analyze' ? 'chat' : 'sheet',
+      inputRange: inputRange,
+      inputColumns: columnsWithData,
+      steps: steps
+    };
+    
+  } catch (e) {
+    Logger.log('[AIClassifier] Error: ' + e.message);
+    return { isMultiStep: false, steps: [] };
+  }
+}
+
+/**
  * Local fallback for chain parsing when API unavailable
  * 
  * @param {string} command - User command

@@ -34,10 +34,11 @@ async function checkForMultiStepCommand(command) {
     return false;
   }
   
-  // Skip simple formula requests
-  const simpleFormulaPattern = /^(add|create|calculate|compute|make)?\s*(a\s+)?(formula|column)\s+(for|to|that)/i;
-  if (simpleFormulaPattern.test(command)) {
-    console.log('🔗 [TaskChain] Simple formula request - skipping multi-step');
+  // Skip fill-all / multi-column fill commands — these are handled 
+  // by the single-step path via parseCommandWithContext → createMultiColumnPlan.
+  // Uses the i18n function for multi-language support.
+  if (typeof isFillAllCommand === 'function' && isFillAllCommand(command.toLowerCase())) {
+    console.log('🔗 [TaskChain] Fill-all command - handled by single-step path');
     return false;
   }
   
@@ -127,100 +128,11 @@ async function checkForMultiStepCommand(command) {
     });
     
     // ============================================
-    // LOCAL SHORTCUT: Sort commands
-    // Sort is a simple, well-defined operation that doesn't need AI reasoning.
-    // Handle it locally to avoid backend timeout issues.
+    // AI-DRIVEN: Send ALL commands to the backend AI agent.
+    // No local regex shortcuts — the AI decides which tools to use.
+    // If the backend times out, the GAS fallback uses a lightweight
+    // AI classification call to build the workflow.
     // ============================================
-    if (/\b(?:sort|order|arrange)\b/i.test(command)) {
-      const headerRow = enhancedContext.headerRow || context.headerRow || {};
-      const headers = Object.entries(headerRow).filter(([, name]) => name);
-      
-      if (headers.length > 0) {
-        let sortColumnLetter = null;
-        let sortColumnName = null;
-        
-        // Try explicit column letter reference: "column C", "col C"
-        const colLetterMatch = command.match(/(?:column|col\.?)\s+([A-Z])\b/i);
-        if (colLetterMatch) {
-          sortColumnLetter = colLetterMatch[1].toUpperCase();
-          sortColumnName = headerRow[sortColumnLetter] || sortColumnLetter;
-        }
-        
-        // Try matching header names from command text
-        if (!sortColumnLetter) {
-          const cmdLower = command.toLowerCase();
-          // Sort headers by name length descending to prefer longer (more specific) matches
-          const sortedHeaders = headers.slice().sort((a, b) => String(b[1]).length - String(a[1]).length);
-          for (const [col, name] of sortedHeaders) {
-            const headerName = String(name).toLowerCase();
-            const headerWithSpaces = headerName.replace(/_/g, ' ');
-            // Match header name directly or with underscores replaced by spaces
-            if (cmdLower.includes(headerName) || cmdLower.includes(headerWithSpaces)) {
-              sortColumnLetter = col;
-              sortColumnName = name;
-              break;
-            }
-          }
-        }
-        
-        if (sortColumnLetter) {
-          // Determine sort direction
-          const isDescending = /\b(?:descend|desc|highest.*?low|largest.*?small|most.*?least|z.*?a|high.*?low|top.*?bottom|big.*?small)\b/i.test(command);
-          const ascending = !isDescending;
-          
-          // Build data range (include header row for sort to work correctly)
-          const columnsWithData = enhancedContext.columnsWithData || context.selectionInfo?.columnsWithData || Object.keys(headerRow);
-          const dataStartRow = (enhancedContext.dataStartRow || context.selectionInfo?.dataStartRow || 2);
-          const dataEndRow = enhancedContext.dataEndRow || context.selectionInfo?.dataEndRow || 100;
-          const firstCol = columnsWithData[0] || 'A';
-          const lastCol = columnsWithData[columnsWithData.length - 1] || 'A';
-          const sortRange = firstCol + dataStartRow + ':' + lastCol + dataEndRow;
-          
-          const dirLabel = ascending ? 'ascending' : 'descending';
-          const description = 'Sort data by ' + sortColumnName + ' (' + dirLabel + ')';
-          
-          console.log('🔗 [TaskChain] ⚡ Local sort shortcut: ' + sortColumnLetter + ' ' + dirLabel);
-          
-          const sortResult = {
-            isMultiStep: false,
-            isCommand: true,
-            _usedSDKAgent: true,
-            summary: description,
-            clarification: description,
-            outputMode: 'sheet',
-            sheetAction: 'sheetOps',
-            inputRange: sortRange,
-            inputColumns: columnsWithData,
-            steps: [{
-              id: 'step_1',
-              order: 1,
-              action: 'sheetOps',
-              description: description,
-              prompt: command,
-              outputFormat: 'sheetOps',
-              inputColumns: columnsWithData,
-              config: {
-                operations: [{
-                  operation: 'sort',
-                  range: sortRange,
-                  sortBy: [{ column: sortColumnLetter, ascending: ascending }]
-                }]
-              }
-            }]
-          };
-          
-          removeParsingProgress();
-          chainParsing = false;
-          
-          currentChain = sortResult;
-          currentChain.model = selectedModel;
-          currentPlan = sortResult;
-          window.currentPlan = sortResult;
-          renderProposedWorkflow(sortResult);
-          return true;
-        }
-      }
-    }
     
     // Call backend to parse the chain
     const result = await new Promise((resolve, reject) => {
@@ -313,6 +225,30 @@ async function checkForMultiStepCommand(command) {
     }
     
     // No steps - let regular processing handle it
+    // If backend failed with fallback, try GAS-side AI classifier
+    if (result._usedFallback) {
+      console.log('🔗 [TaskChain] Backend failed, trying GAS AI classifier fallback');
+      try {
+        const fallbackResult = await new Promise((resolve, reject) => {
+          google.script.run
+            .withSuccessHandler(resolve)
+            .withFailureHandler(reject)
+            .classifyCommandWithAI(command, enhancedContext, selectedModel);
+        });
+        if (fallbackResult && fallbackResult.steps && fallbackResult.steps.length > 0) {
+          console.log('🔗 [TaskChain] AI classifier produced workflow with ' + fallbackResult.steps.length + ' steps');
+          currentChain = fallbackResult;
+          currentChain.model = selectedModel;
+          currentPlan = fallbackResult;
+          window.currentPlan = fallbackResult;
+          renderProposedWorkflow(fallbackResult);
+          return true;
+        }
+      } catch (classifyError) {
+        console.warn('🔗 [TaskChain] AI classifier fallback failed:', classifyError);
+      }
+    }
+    
     console.log('🔗 [TaskChain] No multi-step workflow detected');
     return false;
     
@@ -320,7 +256,34 @@ async function checkForMultiStepCommand(command) {
     console.error('🔗 [TaskChain] Error:', error);
     removeParsingProgress();
     chainParsing = false;
-    showError('Failed to analyze command: ' + error.message);
+    
+    // Backend failed — try GAS-side AI classifier as fallback
+    try {
+      const ctx = window.currentContext || currentSelectionContext || {};
+      const enhanced = buildEnhancedContext ? buildEnhancedContext(ctx) : ctx;
+      const selectedModel = document.getElementById('agentModelSelect')?.value || 'GEMINI';
+      
+      const localFallback = await new Promise((resolve, reject) => {
+        google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(reject)
+          .classifyCommandWithAI(command, enhanced, selectedModel);
+      });
+      
+      if (localFallback && localFallback.steps && localFallback.steps.length > 0) {
+        console.log('🔗 [TaskChain] Error recovery: AI classifier produced workflow');
+        currentChain = localFallback;
+        currentChain.model = selectedModel;
+        currentPlan = localFallback;
+        window.currentPlan = localFallback;
+        renderProposedWorkflow(localFallback);
+        return true;
+      }
+    } catch (classifyError) {
+      console.warn('🔗 [TaskChain] AI classifier fallback also failed:', classifyError);
+    }
+    
+    showError('Failed to analyze command: ' + (error.message || error));
     return false;
   }
 }

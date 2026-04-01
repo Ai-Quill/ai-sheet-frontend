@@ -960,6 +960,7 @@ function showPlan(plan, originalCommand) {
       fetchCostEstimate(plan, function(estimate) {
         plan.estimate = estimate;
         currentPlan = plan;
+        window.currentPlan = plan;
         
         // Log plan event
         if (typeof logPlanEvent === 'function') {
@@ -974,6 +975,7 @@ function showPlan(plan, originalCommand) {
     fetchCostEstimate(plan, function(estimate) {
       plan.estimate = estimate;
       currentPlan = plan;
+      window.currentPlan = plan;
       
       // Log plan event
       if (typeof logPlanEvent === 'function') {
@@ -1835,6 +1837,7 @@ function handleAIParseResult(result, originalInput, context) {
     fetchCostEstimate(plan, function(estimate) {
       plan.estimate = estimate;
       currentPlan = plan;
+      window.currentPlan = plan;
       addAgentMessage('plan', plan);
       // Trigger format update if auto-populated
       if (currentPlan.formatHint) {

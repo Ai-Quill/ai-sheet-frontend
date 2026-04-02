@@ -159,6 +159,16 @@ var SheetActions_Chart = (function() {
       chartBuilder.addRange(dataRange);
     }
     
+    // CRITICAL: Tell the chart that row 1 is a header row.
+    // Without this, Google Charts tries to plot header text (e.g., "Revenue_M")
+    // as data values, which makes the entire column appear non-numeric → empty chart.
+    chartBuilder.setNumHeaders(1);
+    
+    // Merge strategy: MERGE_COLUMNS combines separate addRange() calls into
+    // a single dataset where the first range is the domain (labels) and
+    // subsequent ranges are data series.
+    chartBuilder.setMergeStrategy(Charts.ChartMergeStrategy.MERGE_COLUMNS);
+    
     chartBuilder.setPosition(posRow, posCol, 0, 0);
     
     // Set chart dimensions for better visibility

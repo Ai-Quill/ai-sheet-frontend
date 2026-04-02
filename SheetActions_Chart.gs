@@ -88,9 +88,45 @@ var SheetActions_Chart = (function() {
     var config = step.config || {};
     
     Logger.log('[SheetActions_Chart] Config received: ' + JSON.stringify(config).substring(0, 500));
+    Logger.log('[SheetActions_Chart] domainColumn=' + (config.domainColumn || 'NONE') + 
+              ', dataColumns=' + JSON.stringify(config.dataColumns || 'NONE') +
+              ', chartType=' + (config.chartType || 'NONE'));
+    
+    // SAFETY NET: If AI didn't provide domainColumn/dataColumns,
+    // auto-detect them from the actual sheet data BEFORE building ranges.
+    // This prevents the fallback path from using the full inputRange (A2:J16)
+    // which includes text columns and produces empty charts.
+    if (!config.domainColumn || !config.dataColumns || config.dataColumns.length === 0) {
+      Logger.log('[SheetActions_Chart] ⚠️ Missing domainColumn/dataColumns — auto-detecting from sheet data');
+      var autoNumeric = _autoDetectNumericColumns(sheet, null);
+      if (autoNumeric.length > 0) {
+        var lastCol = sheet.getLastColumn();
+        var sampleRows = Math.min(5, sheet.getLastRow() - 1);
+        for (var ac = 1; ac <= lastCol; ac++) {
+          var colL = SheetActions_Utils.columnToLetter(ac);
+          if (autoNumeric.indexOf(colL) === -1) {
+            var vals = sheet.getRange(2, ac, sampleRows, 1).getValues();
+            var hasData = vals.some(function(r) { return r[0] !== '' && r[0] !== null; });
+            if (hasData) {
+              config.domainColumn = colL;
+              config.dataColumns = autoNumeric;
+              // Generate series names from headers
+              var headerValues = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+              config.seriesNames = autoNumeric.map(function(dc) {
+                var idx = SheetActions_Utils.letterToColumn(dc) - 1;
+                return headerValues[idx] || dc;
+              });
+              Logger.log('[SheetActions_Chart] Auto-detected: domain=' + colL + ', data=' + autoNumeric.join(',') + ', series=' + config.seriesNames.join(','));
+              break;
+            }
+          }
+        }
+      }
+    }
     
     // Build data range from AI-provided columns
     var rangeResult = _buildDataRangeFromColumns(sheet, config, step);
+    Logger.log('[SheetActions_Chart] rangeResult: ' + (typeof rangeResult === 'string' ? rangeResult : JSON.stringify(rangeResult).substring(0, 300)));
     
     // Handle multi-range (non-contiguous columns) vs single range
     var isMultiRange = rangeResult && rangeResult.multiRange === true;
@@ -159,15 +195,10 @@ var SheetActions_Chart = (function() {
       chartBuilder.addRange(dataRange);
     }
     
-    // CRITICAL: Tell the chart that row 1 is a header row.
-    // Without this, Google Charts tries to plot header text (e.g., "Revenue_M")
-    // as data values, which makes the entire column appear non-numeric → empty chart.
-    chartBuilder.setNumHeaders(1);
-    
-    // Merge strategy: MERGE_COLUMNS combines separate addRange() calls into
-    // a single dataset where the first range is the domain (labels) and
-    // subsequent ranges are data series.
-    chartBuilder.setMergeStrategy(Charts.ChartMergeStrategy.MERGE_COLUMNS);
+    // Tell the chart that headers are present.
+    // Use -1 (auto-detect) rather than a fixed number so the chart correctly
+    // identifies headers regardless of whether the range starts at row 1 or 2.
+    chartBuilder.setNumHeaders(-1);
     
     chartBuilder.setPosition(posRow, posCol, 0, 0);
     

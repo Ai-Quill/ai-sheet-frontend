@@ -193,6 +193,18 @@ async function checkForMultiStepCommand(command) {
         const inputCols = step.inputColumns?.join(',') || 'N/A';
         const outputCol = step.outputColumn || 'N/A';
         console.log(`🔗 [TaskChain] Step ${idx + 1}: ${step.action} | input: ${inputCols} → output: ${outputCol}`);
+        // Log chart-specific config so we can verify AI output
+        if (step.action === 'chart') {
+          const cfg = step.config || step.toolCall || {};
+          console.log('🔗 [TaskChain] 📊 CHART CONFIG from AI:', {
+            domainColumn: cfg.domainColumn || 'MISSING',
+            dataColumns: cfg.dataColumns || 'MISSING',
+            chartType: cfg.chartType || 'MISSING',
+            title: cfg.title || 'MISSING',
+            seriesNames: cfg.seriesNames || 'MISSING',
+            allKeys: Object.keys(cfg)
+          });
+        }
       });
       
       // Normalize and validate steps

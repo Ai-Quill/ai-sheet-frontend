@@ -426,6 +426,20 @@ function executeNextStep(chainId, chainStateOrContext) {
       Logger.log('[TaskChain] Step options: ' + (sheetStep.options ? JSON.stringify(sheetStep.options).substring(0, 200) : 'null'));
       Logger.log('[TaskChain] Step range: ' + (sheetStep.range || 'null'));
       
+      // Chart-specific debug: log domainColumn/dataColumns so we can verify
+      // the AI tool call provided proper column config for charting
+      if (step.action === 'chart') {
+        var chartConfig = sheetStep.config || {};
+        Logger.log('[TaskChain] 📊 CHART DEBUG:');
+        Logger.log('[TaskChain]   domainColumn: ' + (chartConfig.domainColumn || 'MISSING'));
+        Logger.log('[TaskChain]   dataColumns: ' + JSON.stringify(chartConfig.dataColumns || 'MISSING'));
+        Logger.log('[TaskChain]   chartType: ' + (chartConfig.chartType || sheetStep.chartType || 'MISSING'));
+        Logger.log('[TaskChain]   title: ' + (chartConfig.title || 'MISSING'));
+        Logger.log('[TaskChain]   seriesNames: ' + JSON.stringify(chartConfig.seriesNames || 'MISSING'));
+        Logger.log('[TaskChain]   inputRange: ' + (sheetStep.inputRange || 'MISSING'));
+        Logger.log('[TaskChain]   config keys: ' + Object.keys(chartConfig).join(','));
+      }
+      
       // Execute sheet action
       var sheetResult = AgentSheetActions.execute(sheetStep);
       
